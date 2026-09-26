@@ -28,6 +28,20 @@ Players arriving through a Minecraft Transfer packet (1.20.5+) are routed like n
 The database stores only a hash of each world key and the name's label, not the base domain, so moving
 the relay to a new base domain keeps every world's label.
 
+## Deploying
+
+On a fresh Ubuntu or Debian server, once DNS for the relay host and a wildcard for the base domain point
+at it, and the provider's firewall allows 25565/tcp, 25575/udp and 80/tcp:
+
+```
+curl -fsSLO https://raw.githubusercontent.com/5TN1rcZRS79VAEFuUCRB/mcpersist-relay/main/deploy/install.sh
+sudo bash install.sh relay.v2.mcpersist.com v2.mcpersist.com you@example.com
+```
+
+It opens those ports in the server's own firewall, builds the relay, gets a Let's Encrypt certificate for
+the relay host (renewals reload it live), and runs it as the `mcpersist-relay` systemd service. Re-running
+it updates to the latest `main`.
+
 ## Protocol change
 
 `{"kind": "request_domain_assignment", "key": "<16–256 chars>"}`. `key` is optional. When a key can't be
