@@ -2,8 +2,15 @@
 # Installs mcpersist-relay on a fresh Ubuntu/Debian server, as a systemd service with a
 # Let's Encrypt certificate. Run as root, after DNS points at this server:
 #
-#   sudo bash install.sh <relay host> <base domain> <email for Let's Encrypt>
-#   e.g. sudo bash install.sh relay.v2.mcpersist.com v2.mcpersist.com you@example.com
+#   sudo bash install.sh <relay host> <base domain> <email for Let's Encrypt, or none> [homepage URL]
+#   e.g. sudo bash install.sh relay.mcpersist.com mcpersist.com you@example.com https://example.com
+#
+# Besides the relay it sets up, for modded players' peer-to-peer connections:
+# - an iroh relay at https://<relay host>:8443 (plus UDP 7842), using the same certificate;
+# - Caddy on https://<base domain>, serving the relay list (/relaymap.json) and the Dialtone
+#   ticket lookup, and redirecting everything else to the homepage URL if given.
+# DNS: <base domain> and *.<base domain> point here, and *.<base domain> has the TXT record
+# e4mc-dialtone-resolver=<base domain>.
 #
 # Safe to re-run: it rebuilds from the latest main and restarts the service.
 set -euo pipefail
@@ -11,20 +18,24 @@ set -euo pipefail
 RELAY_HOST=${1:?usage: install.sh <relay host> <base domain> <email>}
 BASE_DOMAIN=${2:?usage: install.sh <relay host> <base domain> <email>}
 EMAIL=${3:?usage: install.sh <relay host> <base domain> <email>}
+HOMEPAGE=${4:-}
 REPO=https://github.com/5TN1rcZRS79VAEFuUCRB/mcpersist-relay
 HOME_DIR=/opt/mcpersist-relay
 
 apt-get update
-apt-get install -y build-essential git curl certbot
+apt-get install -y build-essential git curl certbot caddy
 
 # Open the relay's ports in the server's own firewall: 25565/tcp players, 25575/udp hosts
-# (QUIC), 80/tcp certificate renewals. The cloud provider's firewall needs the same.
+# (QUIC), 80/tcp certificate renewals, 443/tcp ticket lookups, 8443/tcp and 7842/udp the
+# iroh relay. The cloud provider's firewall needs the same.
+PORTS="25565/tcp 25575/udp 80/tcp 443/tcp 8443/tcp 7842/udp"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    ufw allow 25565/tcp && ufw allow 25575/udp && ufw allow 80/tcp
+    for port in $PORTS; do ufw allow "$port"; done
 fi
 if iptables -S INPUT 2>/dev/null | grep -q -- "-j REJECT"; then
     # Oracle Cloud's Ubuntu images reject everything but SSH.
-    for rule in "-p tcp --dport 25565" "-p udp --dport 25575" "-p tcp --dport 80"; do
+    for port in $PORTS; do
+        rule="-p ${port#*/} --dport ${port%/*}"
         iptables -C INPUT $rule -j ACCEPT 2>/dev/null || iptables -I INPUT $rule -j ACCEPT
     done
     command -v netfilter-persistent >/dev/null && netfilter-persistent save
@@ -40,11 +51,13 @@ id -u mcpersist-relay >/dev/null 2>&1 || useradd --system --home "$HOME_DIR" --s
 mkdir -p "$HOME_DIR"/{certs,data}
 
 cargo install --locked --git "$REPO" --root "$HOME_DIR"
+cargo install --locked iroh-relay --version "^1" --features server --root "$HOME_DIR"
 
 # Certificate for the host the mod connects to. certbot answers on port 80, now and at
 # every renewal, so keep that port open.
 if [ ! -d "/etc/letsencrypt/live/$RELAY_HOST" ]; then
-    certbot certonly --standalone -d "$RELAY_HOST" --non-interactive --agree-tos -m "$EMAIL" --no-eff-email
+    if [ "$EMAIL" = none ]; then contact=--register-unsafely-without-email; else contact="-m $EMAIL --no-eff-email"; fi
+    certbot certonly --standalone -d "$RELAY_HOST" --non-interactive --agree-tos $contact
 fi
 cat > /etc/letsencrypt/renewal-hooks/deploy/mcpersist-relay.sh <<EOF
 #!/bin/sh
@@ -85,10 +98,71 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+# The iroh relay modded players connect peer-to-peer through. Its plain-HTTP side only
+# serves a captive-portal check, so it stays off port 80 (certbot's) and loopback-only.
+cat > "$HOME_DIR/iroh-relay.toml" <<EOF
+http_bind_addr = "127.0.0.1:3340"
+enable_quic_addr_discovery = true
+enable_metrics = false
+
+[tls]
+https_bind_addr = "[::]:8443"
+quic_bind_addr = "[::]:7842"
+cert_mode = "Reloading"
+manual_cert_path = "$HOME_DIR/certs/fullchain.pem"
+manual_key_path = "$HOME_DIR/certs/privkey.pem"
+EOF
+cat > /etc/systemd/system/mcpersist-iroh-relay.service <<EOF
+[Unit]
+Description=MCPersist iroh relay (peer-to-peer connections)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mcpersist-relay
+ExecStart=$HOME_DIR/bin/iroh-relay --config-path $HOME_DIR/iroh-relay.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# The public face of the base domain: the relay list and ticket lookups only. The relay's
+# other web endpoints (/reload-certs, /stop, ...) stay on loopback.
+if [ -n "$HOMEPAGE" ]; then fallback="redir $HOMEPAGE"; else fallback="respond 404"; fi
+mkdir -p /var/www/mcpersist
+echo "[\"https://$RELAY_HOST:8443\"]" > /var/www/mcpersist/relaymap.json
+cat > /etc/caddy/Caddyfile <<EOF
+{
+	auto_https disable_redirects
+}
+
+https://$BASE_DOMAIN {
+	tls {
+		# Port 80 is certbot's, for the relay certificate.
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	handle /.well-known/dialtone_ticket/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /relaymap.json {
+		root * /var/www/mcpersist
+		file_server
+	}
+	handle {
+		$fallback
+	}
+}
+EOF
+
 systemctl daemon-reload
-systemctl enable --now mcpersist-relay
-systemctl restart mcpersist-relay
+systemctl enable --now mcpersist-relay mcpersist-iroh-relay caddy
+systemctl restart mcpersist-relay mcpersist-iroh-relay caddy
 sleep 2
 systemctl --no-pager status mcpersist-relay | head -5
 curl -fsS http://127.0.0.1:8080/metrics && echo
+systemctl --no-pager status mcpersist-iroh-relay caddy | grep -E "^●|Active:"
 echo "Relay running. Back up $HOME_DIR/data/names.sqlite: it holds every world's address."

@@ -35,7 +35,7 @@ at it, and the provider's firewall allows 25565/tcp, 25575/udp and 80/tcp:
 
 ```
 curl -fsSLO https://raw.githubusercontent.com/5TN1rcZRS79VAEFuUCRB/mcpersist-relay/main/deploy/install.sh
-sudo bash install.sh relay.v2.mcpersist.com v2.mcpersist.com you@example.com
+sudo bash install.sh relay.mcpersist.com mcpersist.com you@example.com
 ```
 
 It opens those ports in the server's own firewall, builds the relay, gets a Let's Encrypt certificate for
