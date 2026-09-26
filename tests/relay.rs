@@ -75,6 +75,17 @@ async fn start_relay_with(
 
 /// Connects as a host and requests a domain; returns the connection and the reply.
 async fn host(relay: &TestRelay, key: Option<&str>) -> (Connection, Value) {
+    let (conn, reply, send, recv) = host_with_control(relay, key).await;
+    // Keep the control stream open for the life of the connection.
+    std::mem::forget((send, recv));
+    (conn, reply)
+}
+
+/// A host session plus its control stream, for sending further control messages.
+async fn host_with_control(
+    relay: &TestRelay,
+    key: Option<&str>,
+) -> (Connection, Value, quinn::SendStream, RecvStream) {
     let mut roots = RootCertStore::empty();
     roots.add(relay.cert.clone()).unwrap();
     let mut tls = rustls::ClientConfig::builder()
@@ -98,12 +109,21 @@ async fn host(relay: &TestRelay, key: Option<&str>) -> (Connection, Value) {
     let request = serde_json::to_vec(&request).unwrap();
     send.write_all(&varint(request.len() as i32)).await.unwrap();
     send.write_all(&request).await.unwrap();
+    let reply = read_control(&mut recv).await;
+    (conn, reply, send, recv)
+}
+
+async fn send_control(send: &mut quinn::SendStream, message: Value) {
+    let message = serde_json::to_vec(&message).unwrap();
+    send.write_all(&varint(message.len() as i32)).await.unwrap();
+    send.write_all(&message).await.unwrap();
+}
+
+async fn read_control(recv: &mut RecvStream) -> Value {
     let len = recv.read_u8().await.unwrap();
     let mut reply = vec![0; len as usize];
     recv.read_exact(&mut reply).await.unwrap();
-    // Keep the control stream open for the life of the connection.
-    std::mem::forget((send, recv));
-    (conn, serde_json::from_slice(&reply).unwrap())
+    serde_json::from_slice(&reply).unwrap()
 }
 
 fn domain(reply: &Value) -> String {
@@ -424,4 +444,44 @@ async fn unknown_names_are_refused_at_once() {
     let refusal = read_refusal(&mut player).await;
     assert!(refusal.contains("Unknown server"), "{refusal}");
     assert!(started.elapsed() < GRACE);
+}
+
+#[tokio::test]
+async fn a_host_handing_off_gets_no_new_players_but_keeps_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (old, reply, mut control, mut replies) = host_with_control(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+    let mut staying = TcpStream::connect(relay.mc).await.unwrap();
+    staying.write_all(&handshake(&name, 2)).await.unwrap();
+    let (mut to_staying, mut from_staying) = accept(&old).await;
+    assert_eq!(read_packet(&mut from_staying).await, handshake(&name, 2)[1..]);
+
+    send_control(&mut control, json!({"kind": "handing_off"})).await;
+    let ack = tokio::time::timeout(Duration::from_secs(5), read_control(&mut replies))
+        .await
+        .expect("no reply to handing_off");
+    assert_eq!(ack["kind"], "handed_off", "{ack}");
+
+    // A player transferred now waits for the background server, not the leaving host.
+    let mut moved = TcpStream::connect(relay.mc).await.unwrap();
+    moved.write_all(&handshake(&name, 3)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (new, reply) = host(&relay, Some(KEY_A)).await;
+    assert_eq!(domain(&reply), name);
+    let (_to_moved, mut from_moved) = accept(&new).await;
+    assert_eq!(read_packet(&mut from_moved).await, handshake(&name, 3)[1..]);
+
+    // Players still on the leaving host keep their connection.
+    to_staying.write_all(b"pong").await.unwrap();
+    let mut got = [0; 4];
+    staying.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"pong");
+
+    // The leaving host closing doesn't take the name from the background server.
+    old.close(0u32.into(), b"bye");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_again, reply) = host(&relay, Some(KEY_A)).await;
+    assert_eq!(reply["kind"], "domain_assignment_failed", "{reply}");
+    assert_eq!(reply["reason"], "name_in_use");
 }

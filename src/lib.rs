@@ -227,6 +227,12 @@ async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> 
                     send_control.write_all(&[response.len() as u8]).await?;
                     send_control.write_all(&response).await?;
                 }
+                // Nothing routes here yet, so there's nothing to hand off.
+                ServerboundControlMessage::HandingOff => {
+                    let response = serde_json::to_vec(&ClientboundControlMessage::HandedOff)?;
+                    send_control.write_all(&[response.len() as u8]).await?;
+                    send_control.write_all(&response).await?;
+                }
             }
         }
         let response = serde_json::to_vec(&ClientboundControlMessage::UnknownMessage)?;
@@ -269,6 +275,13 @@ async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> 
                                 info!("registering ticket {ticket:?}");
                                 dialtone_ticket = Some(ticket);
                                 let response = serde_json::to_vec(&ClientboundControlMessage::TicketRegistered)?;
+                                send_control.write_all(&[response.len() as u8]).await?;
+                                send_control.write_all(&response).await?;
+                            },
+                            ServerboundControlMessage::HandingOff => {
+                                info!("{} is handing off", handle.domain());
+                                handle.detach();
+                                let response = serde_json::to_vec(&ClientboundControlMessage::HandedOff)?;
                                 send_control.write_all(&[response.len() as u8]).await?;
                                 send_control.write_all(&response).await?;
                             },

@@ -12,6 +12,9 @@ pub enum ServerboundControlMessage {
         key: Option<String>,
     },
     DialtoneRegisterTicket { ticket: String },
+    /// The host is leaving and has sent its players on to the world's next host (its
+    /// background server). New players wait for that host; current ones stay connected.
+    HandingOff,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -24,4 +27,5 @@ pub enum ClientboundControlMessage {
     DomainAssignmentFailed { reason: String },
     RequestMessageBroadcast { message: String },
     TicketRegistered,
+    HandedOff,
 }

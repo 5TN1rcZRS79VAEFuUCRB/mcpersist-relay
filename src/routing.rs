@@ -203,6 +203,7 @@ impl RoutingTable {
         Ok((
             RoutingHandle {
                 recv,
+                own: send.downgrade(),
                 domain,
                 label,
                 parent: self,
@@ -229,6 +230,8 @@ impl RoutingTable {
 #[allow(clippy::module_name_repetitions)]
 pub struct RoutingHandle<'a> {
     recv: mpsc::UnboundedReceiver<RouterRequest>,
+    /// Identifies this session's entry, which a later session may have replaced.
+    own: mpsc::WeakUnboundedSender<RouterRequest>,
     domain: String,
     label: String,
     parent: &'a RoutingTable,
@@ -242,12 +245,25 @@ impl RoutingHandle<'_> {
     pub fn domain(&self) -> &str {
         &self.domain
     }
+
+    /// Stops routing new players here, e.g. while the host hands its world to its
+    /// background server, which can then take the name. Current players stay connected.
+    pub fn detach(&self) {
+        let mut table = self.parent.table.write();
+        let ours = match (table.get(&self.domain), self.own.upgrade()) {
+            (Some(entry), Some(own)) => entry.same_channel(&own),
+            _ => false,
+        };
+        if ours {
+            table.remove(&self.domain);
+        }
+    }
 }
 
 impl Drop for RoutingHandle<'_> {
     fn drop(&mut self) {
         info!("Removing stale entry for {}", self.domain);
-        self.parent.table.write().remove(&self.domain);
+        self.detach();
         // Keyless names aren't stored, so this is a no-op for them.
         if let Err(e) = self.parent.names.touch(&self.label) {
             warn!("Failed to record last use of {}: {}", self.domain, e);
