@@ -299,6 +299,24 @@ async fn player_bytes_flow_both_ways_through_a_stable_name() {
 }
 
 #[tokio::test]
+async fn a_player_leaving_resets_the_hosts_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+
+    let mut player = TcpStream::connect(relay.mc).await.unwrap();
+    player.write_all(&handshake(&name, 2)).await.unwrap();
+    let (_to_player, mut from_player) = accept(&conn).await;
+    read_packet(&mut from_player).await;
+    drop(player);
+
+    // A reset, not a FIN: the mod's QUIC library never notices a FIN that arrives without data.
+    let read = tokio::time::timeout(Duration::from_secs(5), from_player.read_to_end(1024)).await;
+    assert!(matches!(read, Ok(Err(_))), "expected the stream to be reset, got {read:?}");
+}
+
+#[tokio::test]
 async fn control_endpoint_serves_metrics() {
     let dir = tempfile::tempdir().unwrap();
     let relay = start_relay(dir.path()).await;

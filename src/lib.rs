@@ -424,9 +424,11 @@ async fn try_handle_minecraft(
         _ = tokio::io::copy(&mut recv_host, &mut send_client) => ()
     }
     _ = connection.shutdown().await;
-    _ = send_host.finish();
+    // Reset rather than finish: the mod's QUIC library (quiche via netty) never reports a FIN
+    // that arrives without data, so the host kept the player until its 30 s timeout.
+    // ponytail: drops the player's last bytes if they're still in flight; they're leaving anyway.
+    _ = send_host.reset(0u32.into());
     _ = recv_host.stop(0u32.into());
-    _ = send_host.stopped().await;
     info!("Minecraft client disconnected from: {}", peer);
     Ok(())
 }
