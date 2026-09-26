@@ -8,8 +8,11 @@ use quinn::SendStream;
 use rand::prelude::*;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::names::{Names, hash_key};
 use crate::proto::ServerboundControlMessage;
@@ -32,11 +35,15 @@ pub struct RoutingTable {
     base_domain: String,
     limiter: DefaultKeyedRateLimiter<IpAddr>,
     names: Names,
+    registered: Notify,
+    startup_grace: Duration,
 }
 
 pub enum RoutingError {
     InvalidDomain,
     RateLimited,
+    /// A persistent world that isn't online; it didn't come back within the grace period.
+    Starting,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,12 +60,40 @@ pub enum RegisterError {
 const KEY_LEN: std::ops::RangeInclusive<usize> = 16..=256;
 
 impl RoutingTable {
-    pub fn new(base_domain: String, names: Names) -> Self {
+    pub fn new(base_domain: String, names: Names, startup_grace: Duration) -> Self {
         RoutingTable {
             table: RwLock::default(),
             base_domain,
             limiter: DefaultKeyedRateLimiter::dashmap(Quota::per_minute(30.try_into().unwrap())),
             names,
+            registered: Notify::new(),
+            startup_grace,
+        }
+    }
+
+    /// Whether `domain` belongs to a persistent world (online or not).
+    fn is_persistent(&self, domain: &str) -> bool {
+        domain
+            .strip_suffix(&format!(".{}", self.base_domain))
+            .is_some_and(|label| self.names.is_taken(label).unwrap_or(false))
+    }
+
+    /// For a persistent world that is offline, e.g. restarting in the background after its
+    /// host left: whether it came back online within the grace period.
+    async fn wait_for_host(&self, domain: &str) -> bool {
+        if !self.is_persistent(domain) {
+            return false;
+        }
+        let deadline = Instant::now() + self.startup_grace;
+        loop {
+            // Created before the check, so a registration in between still wakes it.
+            let registered = self.registered.notified();
+            if self.table.read().contains_key(domain) {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, registered).await.is_err() {
+                return false;
+            }
         }
     }
 
@@ -83,6 +118,15 @@ impl RoutingTable {
             return Err(RoutingError::RateLimited);
         }
         self.limiter.retain_recent();
+        if !self.table.read().contains_key(domain) {
+            if self.wait_for_host(domain).await {
+                info!("{} came back online for a waiting player", domain);
+            } else if self.is_persistent(domain) {
+                return Err(RoutingError::Starting);
+            } else {
+                return Err(RoutingError::InvalidDomain);
+            }
+        }
         let (send, recv) = oneshot::channel();
         self.table
             .read()
@@ -92,6 +136,11 @@ impl RoutingTable {
             .ok()
             .ok_or(RoutingError::InvalidDomain)?;
         recv.await.ok().ok_or(RoutingError::InvalidDomain)
+    }
+
+    /// Whether a status ping should say the world is starting rather than unknown.
+    pub fn is_offline_persistent(&self, domain: &str) -> bool {
+        !self.table.read().contains_key(domain) && self.is_persistent(domain)
     }
 
     fn domain(&self, label: &str) -> String {
@@ -150,6 +199,7 @@ impl RoutingTable {
         let domain = self.domain(&label);
         let (send, recv) = mpsc::unbounded_channel();
         lock.insert(domain.clone(), send.clone());
+        self.registered.notify_waiters();
         Ok((
             RoutingHandle {
                 recv,

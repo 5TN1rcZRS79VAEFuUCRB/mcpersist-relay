@@ -60,6 +60,7 @@ async fn start_relay_with(
         bind_web,
         bind_mc: any,
         clock: Arc::new(move || now.load(Ordering::SeqCst)),
+        startup_grace: GRACE,
     })
     .await?;
     let started = TestRelay {
@@ -170,6 +171,38 @@ async fn accept(conn: &Connection) -> (quinn::SendStream, RecvStream) {
         .await
         .expect("relay never forwarded the player")
         .unwrap()
+}
+
+const GRACE: Duration = Duration::from_secs(2);
+
+/// Reads the relay's refusal: a login Disconnect, or a status response.
+async fn read_refusal(player: &mut TcpStream) -> String {
+    let mut len = 0i32;
+    for shift in (0..35).step_by(7) {
+        let b = player.read_u8().await.unwrap();
+        len |= i32::from(b & 0x7F) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+    }
+    let mut buf = vec![0; len as usize];
+    player.read_exact(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// A login start packet; the relay reads (and discards) it before refusing.
+fn login_start() -> Vec<u8> {
+    let mut body = varint(0);
+    body.extend(varint(5));
+    body.extend(b"Steve");
+    body.extend([0; 16]);
+    let mut packet = varint(body.len() as i32);
+    packet.extend(body);
+    packet
+}
+
+fn status_request() -> Vec<u8> {
+    vec![1, 0]
 }
 
 const KEY_A: &str = "world-key-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -318,4 +351,77 @@ async fn control_endpoints_refuse_a_public_bind_address() {
     )
     .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn joining_player_waits_for_a_restarting_persistent_world() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+    close(&relay, conn, KEY_A).await;
+
+    // Transferred as the host leaves, before the background server is up.
+    let mut player = TcpStream::connect(relay.mc).await.unwrap();
+    player.write_all(&handshake(&name, 3)).await.unwrap();
+    player.write_all(b"ping").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    assert_eq!(domain(&reply), name);
+    let (mut to_player, mut from_player) = accept(&conn).await;
+    assert_eq!(read_packet(&mut from_player).await, handshake(&name, 3)[1..]);
+    let mut got = [0; 4];
+    from_player.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"ping");
+    to_player.write_all(b"pong").await.unwrap();
+    player.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"pong");
+}
+
+#[tokio::test]
+async fn player_is_told_a_world_is_starting_if_it_does_not_come_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+    close(&relay, conn, KEY_A).await;
+
+    let started = tokio::time::Instant::now();
+    let mut player = TcpStream::connect(relay.mc).await.unwrap();
+    player.write_all(&handshake(&name, 2)).await.unwrap();
+    player.write_all(&login_start()).await.unwrap();
+    let refusal = read_refusal(&mut player).await;
+    assert!(refusal.contains("starting up"), "{refusal}");
+    assert!(started.elapsed() >= GRACE, "didn't wait for the world");
+}
+
+#[tokio::test]
+async fn server_list_ping_for_a_restarting_world_answers_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+    close(&relay, conn, KEY_A).await;
+
+    let started = tokio::time::Instant::now();
+    let mut player = TcpStream::connect(relay.mc).await.unwrap();
+    player.write_all(&handshake(&name, 1)).await.unwrap();
+    player.write_all(&status_request()).await.unwrap();
+    let status = read_refusal(&mut player).await;
+    assert!(status.contains("starting up"), "{status}");
+    assert!(started.elapsed() < GRACE);
+}
+
+#[tokio::test]
+async fn unknown_names_are_refused_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let started = tokio::time::Instant::now();
+    let mut player = TcpStream::connect(relay.mc).await.unwrap();
+    player.write_all(&handshake(&format!("nobody-here.{BASE}"), 2)).await.unwrap();
+    player.write_all(&login_start()).await.unwrap();
+    let refusal = read_refusal(&mut player).await;
+    assert!(refusal.contains("Unknown server"), "{refusal}");
+    assert!(started.elapsed() < GRACE);
 }

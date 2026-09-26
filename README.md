@@ -19,10 +19,11 @@ Configured by environment variables:
 | `QUICLIME_DB_PATH` | SQLite file holding key → name assignments. Back it up: losing it changes every world's address |
 | `QUICLIME_BIND_ADDR_QUIC` | UDP address for host connections (e4mc uses port 25575) |
 | `QUICLIME_BIND_ADDR_MC` | TCP address for players, normally `0.0.0.0:25565` |
+| `QUICLIME_STARTUP_GRACE_SECS` | Optional, default 25. How long a joining player waits for an offline persistent world to come back, e.g. while it restarts in the background after its host left. Keep it under the Minecraft client's 30-second timeout |
 | `QUICLIME_BIND_ADDR_WEB` | HTTP control endpoints (metrics, broadcast, stop, cert reload, Dialtone tickets). They have no authentication, so the relay refuses to start unless this is a loopback address such as `127.0.0.1:8080`. If Dialtone is enabled later, expose only `/.well-known/dialtone_ticket/` through a reverse proxy |
 
 A name unused for 90 days is freed; a world that is online is never freed, however long ago it registered.
-Players arriving through a Minecraft Transfer packet (1.20.5+) are routed like normal logins.
+Players arriving through a Minecraft Transfer packet (1.20.5+) are routed like normal logins. A player joining a persistent world that is offline waits up to the startup grace period for it to come back; server-list pings for it say it is starting up.
 
 The database stores only a hash of each world key and the name's label, not the base domain, so moving
 the relay to a new base domain keeps every world's label.

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use eyre::Context;
 use mcpersist_relay::{Config, Relay, system_clock};
 
@@ -17,6 +19,10 @@ async fn main() -> eyre::Result<()> {
         bind_web: env("QUICLIME_BIND_ADDR_WEB")?.parse()?,
         bind_mc: env("QUICLIME_BIND_ADDR_MC")?.parse()?,
         clock: system_clock(),
+        startup_grace: Duration::from_secs(match std::env::var("QUICLIME_STARTUP_GRACE_SECS") {
+            Ok(secs) => secs.parse()?,
+            Err(_) => 25,
+        }),
     })
     .await?;
     relay.serve().await

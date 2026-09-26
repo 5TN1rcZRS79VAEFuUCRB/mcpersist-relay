@@ -87,6 +87,10 @@ pub struct Config {
     pub bind_web: SocketAddr,
     pub bind_mc: SocketAddr,
     pub clock: Clock,
+    /// How long a joining player waits for an offline persistent world to come back, e.g.
+    /// while it restarts in the background after its host left. Keep it under the
+    /// Minecraft client's 30-second read timeout.
+    pub startup_grace: Duration,
 }
 
 /// A relay whose sockets are bound; `serve` runs it.
@@ -117,6 +121,7 @@ impl Relay {
             config.base_domain.clone(),
             names::Names::open(&config.db_path, config.clock.clone())
                 .context("Opening name database")?,
+            config.startup_grace,
         )));
         Ok(Self {
             config,
@@ -377,17 +382,26 @@ async fn try_handle_minecraft(
     }
     let handshake = Handshake::new(&handshake?)?;
     let Some(address) = handshake.normalized_address() else {
-        return politely_disconnect(connection, handshake).await;
+        return disconnect(connection, handshake, UNKNOWN).await;
     };
+    // Server-list pings don't wait for a restarting world; joining players do.
+    if matches!(handshake.next_state, netty::HandshakeType::Status)
+        && routing_table.is_offline_persistent(&address)
+    {
+        return disconnect(connection, handshake, STARTING).await;
+    }
     let (mut send_host, mut recv_host) =
         match routing_table.route_limited(&address, peer.ip()).await {
             Ok(val) => val,
             Err(RoutingError::InvalidDomain) => {
-                return politely_disconnect(connection, handshake).await;
+                return disconnect(connection, handshake, UNKNOWN).await;
+            }
+            Err(RoutingError::Starting) => {
+                return disconnect(connection, handshake, STARTING).await;
             }
             Err(RoutingError::RateLimited) => {
                 warn!("Connection from {} has been rate limited!", peer);
-                return impolitely_disconnect(connection, handshake).await;
+                return disconnect(connection, handshake, RATE_LIMITED).await;
             }
         };
     handshake.send(&mut send_host).await?;
@@ -404,53 +418,29 @@ async fn try_handle_minecraft(
     Ok(())
 }
 
-async fn politely_disconnect(mut connection: TcpStream, handshake: Handshake) -> eyre::Result<()> {
-    match handshake.next_state {
-        netty::HandshakeType::Status => {
-            let packet = netty::read_packet(&mut connection, 1).await?;
-            let mut packet = packet.as_slice();
-            let id = packet.read_varint()?;
-            if id != 0 {
-                return Err(eyre!(
-                    "Packet isn't a Status Request(0x00), but {:#04x}",
-                    id
-                ));
-            }
-            let mut buf = vec![];
-            buf.write_varint(0).await?;
-            buf.write_string(include_str!("./serverlistping_response.json"))
-                .await?;
-            connection.write_varint(buf.len() as i32).await?;
-            connection.write_all(&buf).await?;
-            let packet = netty::read_packet(&mut connection, 9).await?;
-            let mut packet = packet.as_slice();
-            let id = packet.read_varint()?;
-            if id != 1 {
-                return Err(eyre!("Packet isn't a Ping Request(0x01), but {:#04x}", id));
-            }
-            let payload = packet.read_long()?;
-            let mut buf = Vec::with_capacity(1 + 8);
-            buf.write_varint(1).await?;
-            buf.write_u64(payload).await?;
-            connection.write_varint(buf.len() as i32).await?;
-            connection.write_all(&buf).await?;
-        }
-        netty::HandshakeType::Login | netty::HandshakeType::Transfer => {
-            let _ = netty::read_packet(&mut connection, 128).await?;
-            let mut buf = vec![];
-            buf.write_varint(0).await?;
-            buf.write_string(include_str!("./disconnect_response.json"))
-                .await?;
-            connection.write_varint(buf.len() as i32).await?;
-            connection.write_all(&buf).await?;
-        }
-    }
-    Ok(())
+/// What a player is told when they can't be routed: in the server list, and on joining.
+struct Refusal {
+    status: &'static str,
+    login: &'static str,
 }
 
-async fn impolitely_disconnect(
+const UNKNOWN: Refusal = Refusal {
+    status: include_str!("./serverlistping_response.json"),
+    login: include_str!("./disconnect_response.json"),
+};
+const RATE_LIMITED: Refusal = Refusal {
+    status: include_str!("./serverlistping_response_rate.json"),
+    login: include_str!("./disconnect_response_rate.json"),
+};
+const STARTING: Refusal = Refusal {
+    status: include_str!("./serverlistping_response_starting.json"),
+    login: include_str!("./disconnect_response_starting.json"),
+};
+
+async fn disconnect(
     mut connection: TcpStream,
     handshake: Handshake,
+    refusal: Refusal,
 ) -> eyre::Result<()> {
     match handshake.next_state {
         netty::HandshakeType::Status => {
@@ -465,8 +455,7 @@ async fn impolitely_disconnect(
             }
             let mut buf = vec![];
             buf.write_varint(0).await?;
-            buf.write_string(include_str!("./serverlistping_response_rate.json"))
-                .await?;
+            buf.write_string(refusal.status).await?;
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
             let packet = netty::read_packet(&mut connection, 9).await?;
@@ -486,8 +475,7 @@ async fn impolitely_disconnect(
             let _ = netty::read_packet(&mut connection, 128).await?;
             let mut buf = vec![];
             buf.write_varint(0).await?;
-            buf.write_string(include_str!("./disconnect_response_rate.json"))
-                .await?;
+            buf.write_string(refusal.login).await?;
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
         }
