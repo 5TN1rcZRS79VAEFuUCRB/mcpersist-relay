@@ -19,7 +19,10 @@ Configured by environment variables:
 | `QUICLIME_DB_PATH` | SQLite file holding key → name assignments. Back it up: losing it changes every world's address |
 | `QUICLIME_BIND_ADDR_QUIC` | UDP address for host connections (e4mc uses port 25575) |
 | `QUICLIME_BIND_ADDR_MC` | TCP address for players, normally `0.0.0.0:25565` |
-| `QUICLIME_BIND_ADDR_WEB` | HTTP control endpoints (metrics, broadcast, stop, cert reload). These have no authentication, so bind them to `127.0.0.1` |
+| `QUICLIME_BIND_ADDR_WEB` | HTTP control endpoints (metrics, broadcast, stop, cert reload, Dialtone tickets). They have no authentication, so the relay refuses to start unless this is a loopback address such as `127.0.0.1:8080`. If Dialtone is enabled later, expose only `/.well-known/dialtone_ticket/` through a reverse proxy |
+
+A name unused for 90 days is freed; a world that is online is never freed, however long ago it registered.
+Players arriving through a Minecraft Transfer packet (1.20.5+) are routed like normal logins.
 
 The database stores only a hash of each world key and the name's label, not the base domain, so moving
 the relay to a new base domain keeps every world's label.

@@ -127,6 +127,8 @@ impl RoutingTable {
         key: Option<&str>,
     ) -> Result<(RoutingHandle<'_>, RouteRequestReceiver), RegisterError> {
         let mut lock = self.table.write();
+        self.names
+            .expire(|label| lock.contains_key(&self.domain(label)))?;
         let label = match key {
             None => self.fresh_label(&lock)?,
             Some(key) if !KEY_LEN.contains(&key.len()) => return Err(RegisterError::InvalidKey),

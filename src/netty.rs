@@ -170,6 +170,8 @@ pub struct Handshake {
 pub enum HandshakeType {
     Status = 1,
     Login = 2,
+    /// Sent by a client following a server's Transfer packet (1.20.5+); proceeds like Login.
+    Transfer = 3,
 }
 
 impl Handshake {
@@ -184,6 +186,7 @@ impl Handshake {
             let next_state = match packet.read_varint()? {
                 1 => HandshakeType::Status,
                 2 => HandshakeType::Login,
+                3 => HandshakeType::Transfer,
                 _ => return Err(eyre::eyre!("Invalid next state")),
             };
             Ok(Self {

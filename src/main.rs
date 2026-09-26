@@ -1,5 +1,5 @@
 use eyre::Context;
-use mcpersist_relay::{Config, Relay};
+use mcpersist_relay::{Config, Relay, system_clock};
 
 fn env(name: &str) -> eyre::Result<String> {
     std::env::var(name).with_context(|| format!("Reading {name}"))
@@ -16,6 +16,7 @@ async fn main() -> eyre::Result<()> {
         bind_quic: env("QUICLIME_BIND_ADDR_QUIC")?.parse()?,
         bind_web: env("QUICLIME_BIND_ADDR_WEB")?.parse()?,
         bind_mc: env("QUICLIME_BIND_ADDR_MC")?.parse()?,
+        clock: system_clock(),
     })
     .await?;
     relay.serve().await

@@ -1,8 +1,16 @@
 //! Black-box tests of the relay: a fake host over QUIC, fake players over TCP.
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
 
-use mcpersist_relay::{Config, Relay};
+use mcpersist_relay::{Config, EXPIRY_SECS, Relay};
 use quinn::{
     Connection, Endpoint, RecvStream,
     crypto::rustls::QuicClientConfig,
@@ -23,7 +31,22 @@ struct TestRelay {
     cert: CertificateDer<'static>,
 }
 
+/// A relay whose clock reads `now`; tests move it forward.
+async fn start_relay_at(dir: &Path, now: Arc<AtomicI64>) -> TestRelay {
+    start_relay_with(dir, now, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap()
+}
+
 async fn start_relay(dir: &Path) -> TestRelay {
+    start_relay_at(dir, Arc::new(AtomicI64::new(1_000_000_000))).await
+}
+
+async fn start_relay_with(
+    dir: &Path,
+    now: Arc<AtomicI64>,
+    bind_web: SocketAddr,
+) -> eyre::Result<TestRelay> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     std::fs::write(dir.join("cert.pem"), cert.cert.pem()).unwrap();
     std::fs::write(dir.join("key.pem"), cert.signing_key.serialize_pem()).unwrap();
@@ -34,11 +57,11 @@ async fn start_relay(dir: &Path) -> TestRelay {
         base_domain: BASE.into(),
         db_path: dir.join("names.sqlite"),
         bind_quic: any,
-        bind_web: any,
+        bind_web,
         bind_mc: any,
+        clock: Arc::new(move || now.load(Ordering::SeqCst)),
     })
-    .await
-    .unwrap();
+    .await?;
     let started = TestRelay {
         quic: relay.quic_addr().unwrap(),
         mc: relay.mc_addr().unwrap(),
@@ -46,7 +69,7 @@ async fn start_relay(dir: &Path) -> TestRelay {
         cert: cert.cert.der().clone(),
     };
     tokio::spawn(relay.serve());
-    started
+    Ok(started)
 }
 
 /// Connects as a host and requests a domain; returns the connection and the reply.
@@ -141,6 +164,14 @@ async fn read_packet(recv: &mut RecvStream) -> Vec<u8> {
     buf
 }
 
+/// The relay-opened stream carrying one player; fails instead of hanging.
+async fn accept(conn: &Connection) -> (quinn::SendStream, RecvStream) {
+    tokio::time::timeout(Duration::from_secs(5), conn.accept_bi())
+        .await
+        .expect("relay never forwarded the player")
+        .unwrap()
+}
+
 const KEY_A: &str = "world-key-aaaaaaaaaaaaaaaaaaaaaaaa";
 const KEY_B: &str = "world-key-bbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -202,7 +233,7 @@ async fn player_bytes_flow_both_ways_through_a_stable_name() {
     player.write_all(&handshake(&name, 2)).await.unwrap();
     player.write_all(b"ping").await.unwrap();
 
-    let (mut to_player, mut from_player) = conn.accept_bi().await.unwrap();
+    let (mut to_player, mut from_player) = accept(&conn).await;
     let forwarded = read_packet(&mut from_player).await;
     assert_eq!(forwarded, handshake(&name, 2)[1..]);
     let mut got = [0; 4];
@@ -224,4 +255,67 @@ async fn control_endpoint_serves_metrics() {
     let mut body = String::new();
     http.read_to_string(&mut body).await.unwrap();
     assert!(body.ends_with("host_count 1"), "{body}");
+}
+
+#[tokio::test]
+async fn transfer_handshake_is_routed_to_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+
+    let mut player = TcpStream::connect(relay.mc).await.unwrap();
+    player.write_all(&handshake(&name, 3)).await.unwrap();
+
+    let (_to_player, mut from_player) = accept(&conn).await;
+    assert_eq!(read_packet(&mut from_player).await, handshake(&name, 3)[1..]);
+}
+
+const DAY: i64 = 24 * 60 * 60;
+
+#[tokio::test]
+async fn names_unused_for_90_days_are_freed() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicI64::new(1_000_000_000));
+    let relay = start_relay_at(dir.path(), now.clone()).await;
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    let name = domain(&reply);
+    close(&relay, conn, KEY_A).await;
+
+    now.fetch_add(EXPIRY_SECS - DAY, Ordering::SeqCst);
+    let (conn, reply) = host(&relay, Some(KEY_A)).await;
+    assert_eq!(domain(&reply), name, "freed before 90 days");
+    close(&relay, conn, KEY_A).await;
+
+    now.fetch_add(EXPIRY_SECS + DAY, Ordering::SeqCst);
+    let (_conn, reply) = host(&relay, Some(KEY_A)).await;
+    assert_ne!(domain(&reply), name, "not freed after 90 days");
+}
+
+#[tokio::test]
+async fn a_name_in_use_is_never_freed() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicI64::new(1_000_000_000));
+    let relay = start_relay_at(dir.path(), now.clone()).await;
+    let (_online_for_months, reply) = host(&relay, Some(KEY_A)).await;
+    domain(&reply);
+
+    now.fetch_add(EXPIRY_SECS + DAY, Ordering::SeqCst);
+    // Any registration runs expiry.
+    let (_b, reply) = host(&relay, Some(KEY_B)).await;
+    domain(&reply);
+    let (_second, reply) = host(&relay, Some(KEY_A)).await;
+    assert_eq!(reply["reason"], "name_in_use");
+}
+
+#[tokio::test]
+async fn control_endpoints_refuse_a_public_bind_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = start_relay_with(
+        dir.path(),
+        Arc::new(AtomicI64::new(0)),
+        "0.0.0.0:0".parse().unwrap(),
+    )
+    .await;
+    assert!(result.is_err());
 }

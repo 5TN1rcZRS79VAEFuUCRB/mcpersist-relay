@@ -39,6 +39,7 @@ use crate::{
 };
 
 mod names;
+pub use names::{Clock, EXPIRY_SECS, system_clock};
 mod netty;
 mod proto;
 mod routing;
@@ -85,6 +86,7 @@ pub struct Config {
     pub bind_quic: SocketAddr,
     pub bind_web: SocketAddr,
     pub bind_mc: SocketAddr,
+    pub clock: Clock,
 }
 
 /// A relay whose sockets are bound; `serve` runs it.
@@ -98,6 +100,13 @@ pub struct Relay {
 
 impl Relay {
     pub async fn bind(config: Config) -> eyre::Result<Self> {
+        // The control endpoints (stop, broadcast, cert reload) have no authentication.
+        if !config.bind_web.ip().is_loopback() {
+            return Err(eyre!(
+                "QUICLIME_BIND_ADDR_WEB must be a loopback address, got {}",
+                config.bind_web
+            ));
+        }
         // JUSTIFICATION: these live until the end of the entire program
         let config: &'static Config = Box::leak(Box::new(config));
         let endpoint = Box::leak(Box::new(Endpoint::server(
@@ -106,7 +115,8 @@ impl Relay {
         )?));
         let routing_table = Box::leak(Box::new(RoutingTable::new(
             config.base_domain.clone(),
-            names::Names::open(&config.db_path).context("Opening name database")?,
+            names::Names::open(&config.db_path, config.clock.clone())
+                .context("Opening name database")?,
         )));
         Ok(Self {
             config,
@@ -425,7 +435,7 @@ async fn politely_disconnect(mut connection: TcpStream, handshake: Handshake) ->
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
         }
-        netty::HandshakeType::Login => {
+        netty::HandshakeType::Login | netty::HandshakeType::Transfer => {
             let _ = netty::read_packet(&mut connection, 128).await?;
             let mut buf = vec![];
             buf.write_varint(0).await?;
@@ -472,7 +482,7 @@ async fn impolitely_disconnect(
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
         }
-        netty::HandshakeType::Login => {
+        netty::HandshakeType::Login | netty::HandshakeType::Transfer => {
             let _ = netty::read_packet(&mut connection, 128).await?;
             let mut buf = vec![];
             buf.write_varint(0).await?;
