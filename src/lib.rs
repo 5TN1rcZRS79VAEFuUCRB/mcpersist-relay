@@ -44,7 +44,10 @@ mod netty;
 mod proto;
 mod routing;
 mod unicode_madness;
+mod voice;
 mod wordlist;
+
+use voice::VoiceRouter;
 
 fn get_certs(
     cert_path: &FsPath,
@@ -86,6 +89,8 @@ pub struct Config {
     pub bind_quic: SocketAddr,
     pub bind_web: SocketAddr,
     pub bind_mc: SocketAddr,
+    /// UDP, for Simple Voice Chat players.
+    pub bind_voice: SocketAddr,
     pub clock: Clock,
     /// How long a joining player waits for an offline persistent world to come back, e.g.
     /// while it restarts in the background after its host left. Keep it under the
@@ -98,6 +103,7 @@ pub struct Relay {
     config: &'static Config,
     endpoint: &'static Endpoint,
     routing_table: &'static RoutingTable,
+    voice: &'static VoiceRouter,
     web: TcpListener,
     mc: TcpListener,
 }
@@ -123,10 +129,12 @@ impl Relay {
                 .context("Opening name database")?,
             config.startup_grace,
         )));
+        let voice = Box::leak(Box::new(VoiceRouter::bind(config.bind_voice).await?));
         Ok(Self {
             config,
             endpoint,
             routing_table,
+            voice,
             web: TcpListener::bind(config.bind_web).await?,
             mc: TcpListener::bind(config.bind_mc).await?,
         })
@@ -144,10 +152,15 @@ impl Relay {
         self.mc.local_addr()
     }
 
+    pub fn voice_port(&self) -> std::io::Result<u16> {
+        self.voice.port()
+    }
+
     pub async fn serve(self) -> eyre::Result<()> {
         #[allow(unreachable_code)]
         tokio::try_join!(
-            listen_quic(self.endpoint, self.routing_table),
+            listen_quic(self.endpoint, self.routing_table, self.voice),
+            async { self.voice.listen().await.map_err(eyre::Report::from) },
             listen_control(self.config, self.endpoint, self.routing_table, self.web),
             listen_minecraft(self.routing_table, self.mc)
         )?;
@@ -155,8 +168,13 @@ impl Relay {
     }
 }
 
-async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> eyre::Result<()> {
+async fn try_handle_quic(
+    connection: Incoming,
+    routing_table: &RoutingTable,
+    voice: &VoiceRouter,
+) -> eyre::Result<()> {
     let connection = connection.await?;
+    let _voice_session = voice.session(&connection);
     info!(
         "QUIClime connection established to: {}",
         connection.remote_address()
@@ -179,7 +197,8 @@ async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> 
                 ServerboundControlMessage::ProbeCapabilities => {
                     let response =
                         serde_json::to_vec(&ClientboundControlMessage::HasCapabilities {
-                            caps: vec!["dialtone_sidecar".to_string()],
+                            caps: vec!["dialtone_sidecar".to_string(), "voice".to_string()],
+                            voice_port: Some(voice.port()?),
                         })?;
                     send_control.write_all(&[response.len() as u8]).await?;
                     send_control.write_all(&response).await?;
@@ -227,7 +246,9 @@ async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> 
                     send_control.write_all(&[response.len() as u8]).await?;
                     send_control.write_all(&response).await?;
                 }
-                // Nothing routes here yet, so there's nothing to hand off.
+                // Nothing routes here yet, so there's nothing to hand off, and no players
+                // to talk.
+                ServerboundControlMessage::VoiceRegisterPlayer { .. } => {}
                 ServerboundControlMessage::HandingOff => {
                     let response = serde_json::to_vec(&ClientboundControlMessage::HandedOff)?;
                     send_control.write_all(&[response.len() as u8]).await?;
@@ -278,6 +299,9 @@ async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> 
                                 send_control.write_all(&[response.len() as u8]).await?;
                                 send_control.write_all(&response).await?;
                             },
+                            ServerboundControlMessage::VoiceRegisterPlayer { uuid } => {
+                                voice.register(&uuid, &connection);
+                            },
                             ServerboundControlMessage::HandingOff => {
                                 info!("{} is handing off", handle.domain());
                                 handle.detach();
@@ -312,12 +336,13 @@ async fn try_handle_quic(connection: Incoming, routing_table: &RoutingTable) -> 
                     sender.send(RouterRequest::ServerboundControlMessage(parsed))?;
                 }
             }
-        } => r
+        } => r,
+        never = voice.serve_host(&connection) => match never {}
     }
 }
 
-async fn handle_quic(connection: Incoming, routing_table: &RoutingTable) {
-    if let Err(e) = try_handle_quic(connection, routing_table).await {
+async fn handle_quic(connection: Incoming, routing_table: &RoutingTable, voice: &VoiceRouter) {
+    if let Err(e) = try_handle_quic(connection, routing_table, voice).await {
         error!("Error handling QUIClime connection: {:#}", e);
     };
     info!("Finished handling QUIClime connection");
@@ -326,9 +351,10 @@ async fn handle_quic(connection: Incoming, routing_table: &RoutingTable) {
 async fn listen_quic(
     endpoint: &'static Endpoint,
     routing_table: &'static RoutingTable,
+    voice: &'static VoiceRouter,
 ) -> eyre::Result<Infallible> {
     while let Some(connection) = endpoint.accept().await {
-        tokio::spawn(handle_quic(connection, routing_table));
+        tokio::spawn(handle_quic(connection, routing_table, voice));
     }
     Err(eyre!("quiclime endpoint closed"))
 }

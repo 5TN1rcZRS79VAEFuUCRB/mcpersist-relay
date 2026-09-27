@@ -18,6 +18,9 @@ async fn main() -> eyre::Result<()> {
         bind_quic: env("QUICLIME_BIND_ADDR_QUIC")?.parse()?,
         bind_web: env("QUICLIME_BIND_ADDR_WEB")?.parse()?,
         bind_mc: env("QUICLIME_BIND_ADDR_MC")?.parse()?,
+        bind_voice: std::env::var("QUICLIME_BIND_ADDR_VOICE")
+            .unwrap_or_else(|_| "0.0.0.0:24454".into())
+            .parse()?,
         clock: system_clock(),
         startup_grace: Duration::from_secs(match std::env::var("QUICLIME_STARTUP_GRACE_SECS") {
             Ok(secs) => secs.parse()?,

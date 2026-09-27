@@ -15,6 +15,9 @@ pub enum ServerboundControlMessage {
     /// The host is leaving and has sent its players on to the world's next host (its
     /// background server). New players wait for that host; current ones stay connected.
     HandingOff,
+    /// A player of this host's world will use Simple Voice Chat through the relay: send
+    /// their voice packets here.
+    VoiceRegisterPlayer { uuid: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -22,7 +25,12 @@ pub enum ServerboundControlMessage {
 #[serde(rename_all = "snake_case")]
 pub enum ClientboundControlMessage {
     UnknownMessage,
-    HasCapabilities { caps: Vec<String> },
+    HasCapabilities {
+        caps: Vec<String>,
+        /// The UDP port players send voice to, with the "voice" capability.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        voice_port: Option<u16>,
+    },
     DomainAssignmentComplete { domain: String },
     DomainAssignmentFailed { reason: String },
     RequestMessageBroadcast { message: String },

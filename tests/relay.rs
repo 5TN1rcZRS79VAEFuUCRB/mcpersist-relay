@@ -19,7 +19,7 @@ use quinn::{
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, UdpSocket},
 };
 
 const BASE: &str = "relay.test";
@@ -28,6 +28,7 @@ struct TestRelay {
     quic: SocketAddr,
     mc: SocketAddr,
     web: SocketAddr,
+    voice: SocketAddr,
     cert: CertificateDer<'static>,
 }
 
@@ -59,6 +60,7 @@ async fn start_relay_with(
         bind_quic: any,
         bind_web,
         bind_mc: any,
+        bind_voice: any,
         clock: Arc::new(move || now.load(Ordering::SeqCst)),
         startup_grace: GRACE,
     })
@@ -67,6 +69,7 @@ async fn start_relay_with(
         quic: relay.quic_addr().unwrap(),
         mc: relay.mc_addr().unwrap(),
         web: relay.web_addr().unwrap(),
+        voice: SocketAddr::from(([127, 0, 0, 1], relay.voice_port().unwrap())),
         cert: cert.cert.der().clone(),
     };
     tokio::spawn(relay.serve());
@@ -86,6 +89,18 @@ async fn host_with_control(
     relay: &TestRelay,
     key: Option<&str>,
 ) -> (Connection, Value, quinn::SendStream, RecvStream) {
+    let (conn, mut send, mut recv) = connect_host(relay).await;
+    let mut request = json!({"kind": "request_domain_assignment"});
+    if let Some(key) = key {
+        request["key"] = key.into();
+    }
+    send_control(&mut send, request).await;
+    let reply = read_control(&mut recv).await;
+    (conn, reply, send, recv)
+}
+
+/// A host connection with its control stream open, before it asks for a domain.
+async fn connect_host(relay: &TestRelay) -> (Connection, quinn::SendStream, RecvStream) {
     let mut roots = RootCertStore::empty();
     roots.add(relay.cert.clone()).unwrap();
     let mut tls = rustls::ClientConfig::builder()
@@ -101,16 +116,8 @@ async fn host_with_control(
         .unwrap()
         .await
         .unwrap();
-    let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    let mut request = json!({"kind": "request_domain_assignment"});
-    if let Some(key) = key {
-        request["key"] = key.into();
-    }
-    let request = serde_json::to_vec(&request).unwrap();
-    send.write_all(&varint(request.len() as i32)).await.unwrap();
-    send.write_all(&request).await.unwrap();
-    let reply = read_control(&mut recv).await;
-    (conn, reply, send, recv)
+    let (send, recv) = conn.open_bi().await.unwrap();
+    (conn, send, recv)
 }
 
 async fn send_control(send: &mut quinn::SendStream, message: Value) {
@@ -502,4 +509,56 @@ async fn a_host_handing_off_gets_no_new_players_but_keeps_its_own() {
     let (_again, reply) = host(&relay, Some(KEY_A)).await;
     assert_eq!(reply["kind"], "domain_assignment_failed", "{reply}");
     assert_eq!(reply["reason"], "name_in_use");
+}
+
+#[tokio::test]
+async fn voice_goes_between_a_registered_player_and_their_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    // Hosts probe before they ask for a domain, as the mod does.
+    let (conn, mut send, mut recv) = connect_host(&relay).await;
+    send_control(&mut send, json!({"kind": "probe_capabilities"})).await;
+    let caps = read_control(&mut recv).await;
+    assert!(caps["caps"].as_array().unwrap().contains(&"voice".into()), "{caps}");
+    assert_eq!(caps["voice_port"], relay.voice.port(), "{caps}");
+    send_control(&mut send, json!({"kind": "request_domain_assignment", "key": KEY_A})).await;
+    domain(&read_control(&mut recv).await);
+
+    let uuid = [0x0fu8, 0x3d, 0x2c, 0x1b, 0xaa, 0xaa, 0x4b, 0xbb, 0x8c, 0xcc, 1, 0x23, 0x45, 0x67, 0x89, 0xab];
+    send_control(&mut send, json!({"kind": "voice_register_player", "uuid": "0f3d2c1b-aaaa-4bbb-8ccc-0123456789ab"})).await;
+    // Control messages and datagrams aren't ordered: let the registration land.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let player = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut packet = vec![0xFF];
+    packet.extend_from_slice(&uuid);
+    packet.extend_from_slice(b"encrypted voice");
+    player.send_to(&packet, relay.voice).await.unwrap();
+
+    let datagram = tokio::time::timeout(Duration::from_secs(5), conn.read_datagram()).await.unwrap().unwrap();
+    let addr = &datagram[..18];
+    assert_eq!(&datagram[18..], &packet[..]);
+    let port = player.local_addr().unwrap().port();
+    assert_eq!(&addr[16..], &port.to_be_bytes());
+
+    let mut back = addr.to_vec();
+    back.extend_from_slice(b"\xFFreply");
+    conn.send_datagram(back.into()).unwrap();
+    let mut buf = [0u8; 64];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), player.recv_from(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(&buf[..len], b"\xFFreply");
+
+    // The host can only reach its own players.
+    let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut to_stranger = addr[..16].to_vec();
+    to_stranger.extend_from_slice(&stranger.local_addr().unwrap().port().to_be_bytes());
+    to_stranger.extend_from_slice(b"spoofed");
+    conn.send_datagram(to_stranger.into()).unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(500), stranger.recv_from(&mut buf)).await.is_err());
+
+    // Nor does anyone's voice reach a host that didn't register them.
+    let mut unknown = vec![0xFF];
+    unknown.extend_from_slice(&[7u8; 16]);
+    player.send_to(&unknown, relay.voice).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(500), conn.read_datagram()).await.is_err());
 }

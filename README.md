@@ -19,6 +19,7 @@ Configured by environment variables:
 | `QUICLIME_DB_PATH` | SQLite file holding key → name assignments. Back it up: losing it changes every world's address |
 | `QUICLIME_BIND_ADDR_QUIC` | UDP address for host connections (e4mc uses port 25575) |
 | `QUICLIME_BIND_ADDR_MC` | TCP address for players, normally `0.0.0.0:25565` |
+| `QUICLIME_BIND_ADDR_VOICE` | Optional, default `0.0.0.0:24454`. UDP address for players' Simple Voice Chat traffic, which goes to their world's host over its QUIC connection |
 | `QUICLIME_STARTUP_GRACE_SECS` | Optional, default 25. How long a joining player waits for an offline persistent world to come back, e.g. while it restarts in the background after its host left. Keep it under the Minecraft client's 30-second timeout |
 | `QUICLIME_BIND_ADDR_WEB` | HTTP control endpoints (metrics, broadcast, stop, cert reload, Dialtone tickets). They have no authentication, so the relay refuses to start unless this is a loopback address such as `127.0.0.1:8080`. If Dialtone is enabled later, expose only `/.well-known/dialtone_ticket/` through a reverse proxy |
 
@@ -31,7 +32,7 @@ the relay to a new base domain keeps every world's label.
 ## Deploying
 
 On a fresh Ubuntu or Debian server, once DNS for the relay host and a wildcard for the base domain point
-at it, and the provider's firewall allows 25565/tcp, 25575/udp and 80/tcp:
+at it, and the provider's firewall allows 25565/tcp, 25575/udp, 24454/udp and 80/tcp:
 
 ```
 curl -fsSLO https://raw.githubusercontent.com/5TN1rcZRS79VAEFuUCRB/mcpersist-relay/main/deploy/install.sh
@@ -47,6 +48,13 @@ it updates to the latest `main`.
 `{"kind": "request_domain_assignment", "key": "<16–256 chars>"}`. `key` is optional. When a key can't be
 served, the relay replies `{"kind": "domain_assignment_failed", "reason": "name_in_use" | "invalid_key" |
 "internal"}` and closes the connection.
+
+Voice: `probe_capabilities` lists `"voice"` and gives `voice_port`, the UDP port players send Simple
+Voice Chat packets to. A host sends `{"kind": "voice_register_player", "uuid": "<uuid>"}` for each
+player using voice through the relay; that player's packets (which start with `0xFF` and their UUID)
+then reach the host as QUIC datagrams, prefixed with the player's address (16-byte IPv6, IPv4 mapped,
+then a 2-byte port). The host replies with datagrams in the same form, and the relay sends them only to
+addresses that have sent voice for that host.
 
 ## Tests
 

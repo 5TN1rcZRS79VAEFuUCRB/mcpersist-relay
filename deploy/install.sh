@@ -26,9 +26,9 @@ apt-get update
 apt-get install -y build-essential git curl certbot caddy
 
 # Open the relay's ports in the server's own firewall: 25565/tcp players, 25575/udp hosts
-# (QUIC), 80/tcp certificate renewals, 443/tcp ticket lookups, 8443/tcp and 7842/udp the
+# (QUIC), 24454/udp players' Simple Voice Chat, 80/tcp certificate renewals, 443/tcp ticket lookups, 8443/tcp and 7842/udp the
 # iroh relay. The cloud provider's firewall needs the same.
-PORTS="25565/tcp 25575/udp 80/tcp 443/tcp 8443/tcp 7842/udp"
+PORTS="25565/tcp 25575/udp 24454/udp 80/tcp 443/tcp 8443/tcp 7842/udp"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
     for port in $PORTS; do ufw allow "$port"; done
 fi
@@ -88,6 +88,7 @@ Environment=QUICLIME_BASE_DOMAIN=$BASE_DOMAIN
 Environment=QUICLIME_DB_PATH=$HOME_DIR/data/names.sqlite
 Environment=QUICLIME_BIND_ADDR_QUIC=0.0.0.0:25575
 Environment=QUICLIME_BIND_ADDR_MC=0.0.0.0:25565
+Environment=QUICLIME_BIND_ADDR_VOICE=0.0.0.0:24454
 Environment=QUICLIME_BIND_ADDR_WEB=127.0.0.1:8080
 Environment=RUST_LOG=info
 # Binding 25565 as a non-root user.

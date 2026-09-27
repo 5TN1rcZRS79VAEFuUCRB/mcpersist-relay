@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 axum = "0.8.8"
+bytes = "1.11.0"
 axum-client-ip = "1.1.3"
 env_logger = "0.11.8"
 eyre = "0.6.12"
