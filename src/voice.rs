@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use log::debug;
+use log::{debug, info};
 use parking_lot::Mutex;
 use quinn::Connection;
 use tokio::net::UdpSocket;
@@ -44,8 +44,9 @@ impl VoiceRouter {
 
     /// Voice for `uuid` goes to `host` from now on (the newest host wins, as after a handoff).
     pub fn register(&self, uuid: &str, host: &Connection) {
-        if let Some(uuid) = parse_uuid(uuid) {
-            self.players.lock().insert(uuid, host.clone());
+        if let Some(parsed) = parse_uuid(uuid) {
+            info!("Voice for {uuid} goes to {}", host.remote_address());
+            self.players.lock().insert(parsed, host.clone());
         }
     }
 
@@ -68,9 +69,12 @@ impl VoiceRouter {
             }
             let uuid: [u8; 16] = packet[1..17].try_into().unwrap();
             let Some(host) = self.players.lock().get(&uuid).cloned() else {
+                debug!("Voice from {from} for an unregistered player");
                 continue;
             };
-            self.clients.lock().insert(from, host.stable_id());
+            if self.clients.lock().insert(from, host.stable_id()).is_none() {
+                info!("Voice from {from} goes to {}", host.remote_address());
+            }
             let mut datagram = Vec::with_capacity(ADDR_LEN + len);
             datagram.extend_from_slice(&encode_addr(from));
             datagram.extend_from_slice(packet);
