@@ -50,6 +50,8 @@ fi
 id -u mcpersist-relay >/dev/null 2>&1 || useradd --system --home "$HOME_DIR" --shell /usr/sbin/nologin mcpersist-relay
 mkdir -p "$HOME_DIR"/{certs,data}
 
+# cargo install builds under $TMPDIR; Ubuntu 26.04's /tmp is a RAM disk too small for it.
+export TMPDIR=/var/tmp
 cargo install --locked --git "$REPO" --root "$HOME_DIR"
 cargo install --locked iroh-relay --version "^1" --features server --root "$HOME_DIR"
 
