@@ -127,8 +127,15 @@ async fn send_control(send: &mut quinn::SendStream, message: Value) {
 }
 
 async fn read_control(recv: &mut RecvStream) -> Value {
-    let len = recv.read_u8().await.unwrap();
-    let mut reply = vec![0; len as usize];
+    let mut len = 0usize;
+    for shift in (0..35).step_by(7) {
+        let byte = recv.read_u8().await.unwrap();
+        len |= usize::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    let mut reply = vec![0; len];
     recv.read_exact(&mut reply).await.unwrap();
     serde_json::from_slice(&reply).unwrap()
 }
@@ -320,7 +327,10 @@ async fn a_player_leaving_resets_the_hosts_stream() {
 
     // A reset, not a FIN: the mod's QUIC library never notices a FIN that arrives without data.
     let read = tokio::time::timeout(Duration::from_secs(5), from_player.read_to_end(1024)).await;
-    assert!(matches!(read, Ok(Err(_))), "expected the stream to be reset, got {read:?}");
+    assert!(
+        matches!(read, Ok(Err(_))),
+        "expected the stream to be reset, got {read:?}"
+    );
 }
 
 #[tokio::test]
@@ -329,7 +339,9 @@ async fn control_endpoint_serves_metrics() {
     let relay = start_relay(dir.path()).await;
     let (_conn, _) = host(&relay, Some(KEY_A)).await;
     let mut http = TcpStream::connect(relay.web).await.unwrap();
-    http.write_all(b"GET /metrics HTTP/1.0\r\n\r\n").await.unwrap();
+    http.write_all(b"GET /metrics HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
     let mut body = String::new();
     http.read_to_string(&mut body).await.unwrap();
     assert!(body.ends_with("host_count 1"), "{body}");
@@ -346,7 +358,10 @@ async fn transfer_handshake_is_routed_to_the_host() {
     player.write_all(&handshake(&name, 3)).await.unwrap();
 
     let (_to_player, mut from_player) = accept(&conn).await;
-    assert_eq!(read_packet(&mut from_player).await, handshake(&name, 3)[1..]);
+    assert_eq!(
+        read_packet(&mut from_player).await,
+        handshake(&name, 3)[1..]
+    );
 }
 
 const DAY: i64 = 24 * 60 * 60;
@@ -415,7 +430,10 @@ async fn joining_player_waits_for_a_restarting_persistent_world() {
     let (conn, reply) = host(&relay, Some(KEY_A)).await;
     assert_eq!(domain(&reply), name);
     let (mut to_player, mut from_player) = accept(&conn).await;
-    assert_eq!(read_packet(&mut from_player).await, handshake(&name, 3)[1..]);
+    assert_eq!(
+        read_packet(&mut from_player).await,
+        handshake(&name, 3)[1..]
+    );
     let mut got = [0; 4];
     from_player.read_exact(&mut got).await.unwrap();
     assert_eq!(&got, b"ping");
@@ -464,7 +482,10 @@ async fn unknown_names_are_refused_at_once() {
     let relay = start_relay(dir.path()).await;
     let started = tokio::time::Instant::now();
     let mut player = TcpStream::connect(relay.mc).await.unwrap();
-    player.write_all(&handshake(&format!("nobody-here.{BASE}"), 2)).await.unwrap();
+    player
+        .write_all(&handshake(&format!("nobody-here.{BASE}"), 2))
+        .await
+        .unwrap();
     player.write_all(&login_start()).await.unwrap();
     let refusal = read_refusal(&mut player).await;
     assert!(refusal.contains("Unknown server"), "{refusal}");
@@ -480,7 +501,10 @@ async fn a_host_handing_off_gets_no_new_players_but_keeps_its_own() {
     let mut staying = TcpStream::connect(relay.mc).await.unwrap();
     staying.write_all(&handshake(&name, 2)).await.unwrap();
     let (mut to_staying, mut from_staying) = accept(&old).await;
-    assert_eq!(read_packet(&mut from_staying).await, handshake(&name, 2)[1..]);
+    assert_eq!(
+        read_packet(&mut from_staying).await,
+        handshake(&name, 2)[1..]
+    );
 
     send_control(&mut control, json!({"kind": "handing_off"})).await;
     let ack = tokio::time::timeout(Duration::from_secs(5), read_control(&mut replies))
@@ -519,13 +543,27 @@ async fn voice_goes_between_a_registered_player_and_their_host() {
     let (conn, mut send, mut recv) = connect_host(&relay).await;
     send_control(&mut send, json!({"kind": "probe_capabilities"})).await;
     let caps = read_control(&mut recv).await;
-    assert!(caps["caps"].as_array().unwrap().contains(&"voice".into()), "{caps}");
+    assert!(
+        caps["caps"].as_array().unwrap().contains(&"voice".into()),
+        "{caps}"
+    );
     assert_eq!(caps["voice_port"], relay.voice.port(), "{caps}");
-    send_control(&mut send, json!({"kind": "request_domain_assignment", "key": KEY_A})).await;
+    send_control(
+        &mut send,
+        json!({"kind": "request_domain_assignment", "key": KEY_A}),
+    )
+    .await;
     domain(&read_control(&mut recv).await);
 
-    let uuid = [0x0fu8, 0x3d, 0x2c, 0x1b, 0xaa, 0xaa, 0x4b, 0xbb, 0x8c, 0xcc, 1, 0x23, 0x45, 0x67, 0x89, 0xab];
-    send_control(&mut send, json!({"kind": "voice_register_player", "uuid": "0f3d2c1b-aaaa-4bbb-8ccc-0123456789ab"})).await;
+    let uuid = [
+        0x0fu8, 0x3d, 0x2c, 0x1b, 0xaa, 0xaa, 0x4b, 0xbb, 0x8c, 0xcc, 1, 0x23, 0x45, 0x67, 0x89,
+        0xab,
+    ];
+    send_control(
+        &mut send,
+        json!({"kind": "voice_register_player", "uuid": "0f3d2c1b-aaaa-4bbb-8ccc-0123456789ab"}),
+    )
+    .await;
     // Control messages and datagrams aren't ordered: let the registration land.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -535,7 +573,10 @@ async fn voice_goes_between_a_registered_player_and_their_host() {
     packet.extend_from_slice(b"encrypted voice");
     player.send_to(&packet, relay.voice).await.unwrap();
 
-    let datagram = tokio::time::timeout(Duration::from_secs(5), conn.read_datagram()).await.unwrap().unwrap();
+    let datagram = tokio::time::timeout(Duration::from_secs(5), conn.read_datagram())
+        .await
+        .unwrap()
+        .unwrap();
     let addr = &datagram[..18];
     assert_eq!(&datagram[18..], &packet[..]);
     let port = player.local_addr().unwrap().port();
@@ -545,7 +586,10 @@ async fn voice_goes_between_a_registered_player_and_their_host() {
     back.extend_from_slice(b"\xFFreply");
     conn.send_datagram(back.into()).unwrap();
     let mut buf = [0u8; 64];
-    let (len, _) = tokio::time::timeout(Duration::from_secs(5), player.recv_from(&mut buf)).await.unwrap().unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(5), player.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(&buf[..len], b"\xFFreply");
 
     // The host can only reach its own players.
@@ -554,11 +598,75 @@ async fn voice_goes_between_a_registered_player_and_their_host() {
     to_stranger.extend_from_slice(&stranger.local_addr().unwrap().port().to_be_bytes());
     to_stranger.extend_from_slice(b"spoofed");
     conn.send_datagram(to_stranger.into()).unwrap();
-    assert!(tokio::time::timeout(Duration::from_millis(500), stranger.recv_from(&mut buf)).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), stranger.recv_from(&mut buf))
+            .await
+            .is_err()
+    );
 
     // Nor does anyone's voice reach a host that didn't register them.
     let mut unknown = vec![0xFF];
     unknown.extend_from_slice(&[7u8; 16]);
     player.send_to(&unknown, relay.voice).await.unwrap();
-    assert!(tokio::time::timeout(Duration::from_millis(500), conn.read_datagram()).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), conn.read_datagram())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_broadcast_longer_than_a_byte_can_count_arrives_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (_conn, _, _send, mut recv) = host_with_control(&relay, Some(KEY_A)).await;
+    let message = "The relay restarts for maintenance at noon UTC. ".repeat(6);
+    let mut http = TcpStream::connect(relay.web).await.unwrap();
+    http.write_all(
+        format!(
+            "POST /broadcast HTTP/1.0\r\nContent-Length: {}\r\n\r\n{message}",
+            message.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let reply = read_control(&mut recv).await;
+    assert_eq!(reply["kind"], "request_message_broadcast");
+    assert_eq!(reply["message"], message.as_str());
+}
+
+#[tokio::test]
+async fn dialtone_ticket_is_served_to_a_forwarded_player() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let (_conn, reply, mut send, mut recv) = host_with_control(&relay, Some(KEY_A)).await;
+    send_control(
+        &mut send,
+        json!({"kind": "dialtone_register_ticket", "ticket": "ticket-123"}),
+    )
+    .await;
+    assert_eq!(read_control(&mut recv).await["kind"], "ticket_registered");
+    let request = |headers: &str| {
+        format!(
+            "GET /.well-known/dialtone_ticket/{} HTTP/1.0\r\n{headers}\r\n",
+            domain(&reply)
+        )
+    };
+    let mut http = TcpStream::connect(relay.web).await.unwrap();
+    http.write_all(request("X-Forwarded-For: 198.51.100.1, 203.0.113.9\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut body = String::new();
+    http.read_to_string(&mut body).await.unwrap();
+    assert!(
+        body.starts_with("HTTP/1.0 200") && body.ends_with("ticket-123"),
+        "{body}"
+    );
+    // Caddy always sets the header; without it there's no player address to rate-limit.
+    let mut http = TcpStream::connect(relay.web).await.unwrap();
+    http.write_all(request("").as_bytes()).await.unwrap();
+    let mut body = String::new();
+    http.read_to_string(&mut body).await.unwrap();
+    assert!(!body.starts_with("HTTP/1.0 200"), "{body}");
 }

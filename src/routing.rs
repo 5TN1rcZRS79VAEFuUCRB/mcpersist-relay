@@ -144,11 +144,8 @@ impl RoutingTable {
     }
 
     fn domain(&self, label: &str) -> String {
-        crate::unicode_madness::validate_and_normalize_domain(&format!(
-            "{label}.{}",
-            self.base_domain
-        ))
-        .expect("Resulting domain is not valid")
+        crate::netty::validate_and_normalize_domain(&format!("{label}.{}", self.base_domain))
+            .expect("Resulting domain is not valid")
     }
 
     /// A label that is neither live nor reserved by some world's key.

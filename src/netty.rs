@@ -67,24 +67,6 @@ pub trait ReadExt: Read {
         error!("Varint is invalid");
         Err(std::io::ErrorKind::InvalidData.into())
     }
-
-    // fn read_packet_compressed(&mut self) -> Result<Vec<u8>, NettyReadError> {
-    //     let len = self.read_varint()?;
-    //     let len_decompressed = self.read_varint()?;
-    //     let mut buf = vec![0u8; len as usize];
-    //     self.read_exact(&mut buf)?;
-    //     if len_decompressed == 0 {
-    //         return Ok(buf);
-    //     }
-    //     let mut buf_decompressed = vec![0u8; len_decompressed as usize];
-    //     if flate2::Decompress::new(true)
-    //         .decompress(&buf, &mut buf_decompressed, flate2::FlushDecompress::Finish)
-    //         .is_err()
-    //     {
-    //         return Err(std::io::ErrorKind::InvalidData.into());
-    //     };
-    //     Ok(buf_decompressed)
-    // }
 }
 
 pub async fn read_packet(
@@ -92,29 +74,20 @@ pub async fn read_packet(
     max_size: usize,
 ) -> Result<Vec<u8>, ReadError> {
     let len = read_varint(&mut reader).await?;
+    let mut first = [0u8];
+    if len == 254 {
+        // FE 01 FA: a Legacy ServerListPing reads as a 254-byte packet starting 0xFA.
+        reader.read_exact(&mut first).await?;
+        if first[0] == 0xFA {
+            return Err(ReadError::LegacyServerListPing);
+        }
+    }
     if len < 0 || (len as usize) > max_size {
-        return Err(if len == 254 {
-            let mut temp = [0u8];
-            reader.read_exact(&mut temp).await?;
-            if temp[0] == 0xFA {
-                // FE 01 FA: Legacy ServerListPing
-                ReadError::LegacyServerListPing
-            } else {
-                ReadError::PacketTooLarge
-            }
-        } else {
-            ReadError::PacketTooLarge
-        });
+        return Err(ReadError::PacketTooLarge);
     }
     let mut buf = vec![0u8; len as usize];
     if len == 254 {
-        let mut temp = [0u8];
-        reader.read_exact(&mut temp).await?;
-        if temp[0] == 0xFA {
-            // FE 01 FA: Legacy ServerListPing
-            return Err(ReadError::LegacyServerListPing);
-        }
-        buf[0] = temp[0];
+        buf[0] = first[0];
         reader.read_exact(&mut buf[1..]).await?;
     } else {
         reader.read_exact(&mut buf).await?;
@@ -214,7 +187,7 @@ impl Handshake {
     }
 
     pub fn normalized_address(&self) -> Option<String> {
-        crate::unicode_madness::validate_and_normalize_domain(
+        validate_and_normalize_domain(
             // yes, Forge has three different suffixes that they attach to the server address
             if let Some(fml3_stripped) = self.server_address.strip_suffix("\0FML3\0") {
                 fml3_stripped
@@ -230,3 +203,12 @@ impl Handshake {
 }
 
 impl<T: AsyncWriteExt + Unpin> WriteExt for T {}
+
+pub(crate) fn validate_and_normalize_domain(domain: &str) -> Option<String> {
+    // yes, this madness is how you actually validate domains
+    // https://url.spec.whatwg.org/#host-writing
+    // I don't do any more normalisation because domain_to_ascii already does nameprep
+    let domain = idna::domain_to_ascii_strict(domain).ok()?;
+    let (domain, err) = idna::domain_to_unicode(&domain);
+    if err.is_err() { None } else { Some(domain) }
+}

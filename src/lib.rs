@@ -12,23 +12,23 @@ use std::{
 
 use axum::{
     extract::Path,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use axum_client_ip::RightmostXForwardedFor;
 use eyre::{Context, eyre};
 use log::{error, info, warn};
 use netty::{Handshake, ReadError};
 use quinn::{
-    ConnectionError, Endpoint, Incoming, ServerConfig, TransportConfig, VarInt,
+    ConnectionError, Endpoint, Incoming, RecvStream, SendStream, ServerConfig, TransportConfig,
+    VarInt,
     crypto::rustls::QuicServerConfig,
     rustls::pki_types::{CertificateDer, PrivateKeyDer},
 };
 use routing::{RoutingError, RoutingTable};
-use tokio::net::TcpListener;
 use rustls_pki_types::pem::PemObject;
+use tokio::net::TcpListener;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::TcpStream,
 };
 
@@ -43,7 +43,6 @@ pub use names::{Clock, EXPIRY_SECS, system_clock};
 mod netty;
 mod proto;
 mod routing;
-mod unicode_madness;
 mod voice;
 mod wordlist;
 
@@ -53,10 +52,8 @@ fn get_certs(
     cert_path: &FsPath,
     key_path: &FsPath,
 ) -> eyre::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    let mut cert_file = std::io::BufReader::new(
-        std::fs::File::open(cert_path).context("Opening certificate")?,
-    );
-    let certs = rustls_pki_types::pem::ReadIter::new(&mut cert_file)
+    let certs = CertificateDer::pem_file_iter(cert_path)
+        .context("Opening certificate")?
         .filter_map(Result::ok)
         .collect();
     let key = PrivateKeyDer::from_pem_file(key_path)?;
@@ -168,6 +165,31 @@ impl Relay {
     }
 }
 
+/// A control message to the host: its JSON's length as a varint, then the JSON.
+async fn write_message(
+    stream: &mut SendStream,
+    message: &ClientboundControlMessage,
+) -> eyre::Result<()> {
+    let json = serde_json::to_vec(message)?;
+    let mut framed = Vec::with_capacity(json.len() + 5);
+    framed.write_varint(json.len() as i32).await?;
+    framed.extend_from_slice(&json);
+    stream.write_all(&framed).await?;
+    Ok(())
+}
+
+/// The host's next control message, framed like `write_message`; `None` for one this relay
+/// doesn't understand. A length out of bounds ends the connection.
+async fn read_message(stream: &mut RecvStream) -> eyre::Result<Option<ServerboundControlMessage>> {
+    let len = read_varint(&mut *stream).await?;
+    if !(0..=8192).contains(&len) {
+        return Err(eyre!("control message of {len} bytes"));
+    }
+    let mut buf = vec![0u8; len as usize];
+    stream.read_exact(&mut buf).await?;
+    Ok(serde_json::from_slice(&buf).ok())
+}
+
 async fn try_handle_quic(
     connection: Incoming,
     routing_table: &RoutingTable,
@@ -185,23 +207,17 @@ async fn try_handle_quic(
     let mut dialtone_ticket = None;
 
     let (mut handle, sender) = loop {
-        let len = read_varint(&mut recv_control).await?;
-        if !(0..=8192).contains(&len) {
-            connection.close(VarInt::from_u32(0), &[]);
-            return Ok(());
-        }
-        let mut buf = vec![0u8; len as usize];
-        recv_control.read_exact(&mut buf).await?;
-        if let Ok(parsed) = serde_json::from_slice(&buf) {
-            match parsed {
+        if let Some(message) = read_message(&mut recv_control).await? {
+            match message {
                 ServerboundControlMessage::ProbeCapabilities => {
-                    let response =
-                        serde_json::to_vec(&ClientboundControlMessage::HasCapabilities {
+                    write_message(
+                        &mut send_control,
+                        &ClientboundControlMessage::HasCapabilities {
                             caps: vec!["dialtone_sidecar".to_string(), "voice".to_string()],
                             voice_port: Some(voice.port()?),
-                        })?;
-                    send_control.write_all(&[response.len() as u8]).await?;
-                    send_control.write_all(&response).await?;
+                        },
+                    )
+                    .await?;
                     continue;
                 }
                 ServerboundControlMessage::RequestDomainAssignment { key } => {
@@ -213,13 +229,13 @@ async fn try_handle_quic(
                                 connection.remote_address(),
                                 e
                             );
-                            let response = serde_json::to_vec(
+                            write_message(
+                                &mut send_control,
                                 &ClientboundControlMessage::DomainAssignmentFailed {
                                     reason: e.to_string(),
                                 },
-                            )?;
-                            send_control.write_all(&[response.len() as u8]).await?;
-                            send_control.write_all(&response).await?;
+                            )
+                            .await?;
                             send_control.finish()?;
                             _ = send_control.stopped().await;
                             connection.close(VarInt::from_u32(0), b"domain assignment failed");
@@ -231,34 +247,36 @@ async fn try_handle_quic(
                         connection.remote_address(),
                         handle.0.domain()
                     );
-                    let response =
-                        serde_json::to_vec(&ClientboundControlMessage::DomainAssignmentComplete {
+                    write_message(
+                        &mut send_control,
+                        &ClientboundControlMessage::DomainAssignmentComplete {
                             domain: handle.0.domain().to_string(),
-                        })?;
-                    send_control.write_all(&[response.len() as u8]).await?;
-                    send_control.write_all(&response).await?;
+                        },
+                    )
+                    .await?;
                     break handle;
                 }
                 ServerboundControlMessage::DialtoneRegisterTicket { ticket } => {
                     dialtone_ticket = Some(ticket);
-                    let response =
-                        serde_json::to_vec(&ClientboundControlMessage::TicketRegistered)?;
-                    send_control.write_all(&[response.len() as u8]).await?;
-                    send_control.write_all(&response).await?;
+                    write_message(
+                        &mut send_control,
+                        &ClientboundControlMessage::TicketRegistered,
+                    )
+                    .await?;
                 }
                 // Nothing routes here yet, so there's nothing to hand off, and no players
                 // to talk.
                 ServerboundControlMessage::VoiceRegisterPlayer { .. } => {}
                 ServerboundControlMessage::HandingOff => {
-                    let response = serde_json::to_vec(&ClientboundControlMessage::HandedOff)?;
-                    send_control.write_all(&[response.len() as u8]).await?;
-                    send_control.write_all(&response).await?;
+                    write_message(&mut send_control, &ClientboundControlMessage::HandedOff).await?;
                 }
             }
         }
-        let response = serde_json::to_vec(&ClientboundControlMessage::UnknownMessage)?;
-        send_control.write_all(&[response.len() as u8]).await?;
-        send_control.write_all(&response).await?;
+        write_message(
+            &mut send_control,
+            &ClientboundControlMessage::UnknownMessage,
+        )
+        .await?;
     };
 
     tokio::select! {
@@ -283,21 +301,16 @@ async fn try_handle_quic(
                         remote.send(pair?).map_err(|e| eyre!("{:?}", e))?;
                     }
                     routing::RouterRequest::BroadcastRequest(message) => {
-                        let response =
-                            serde_json::to_vec(&ClientboundControlMessage::RequestMessageBroadcast {
+                        write_message(&mut send_control, &ClientboundControlMessage::RequestMessageBroadcast {
                                 message,
-                            })?;
-                        send_control.write_all(&[response.len() as u8]).await?;
-                        send_control.write_all(&response).await?;
+                            }).await?;
                     },
                     routing::RouterRequest::ServerboundControlMessage(message) => {
                         match message {
                             ServerboundControlMessage::DialtoneRegisterTicket { ticket } => {
                                 info!("registering ticket {ticket:?}");
                                 dialtone_ticket = Some(ticket);
-                                let response = serde_json::to_vec(&ClientboundControlMessage::TicketRegistered)?;
-                                send_control.write_all(&[response.len() as u8]).await?;
-                                send_control.write_all(&response).await?;
+                                write_message(&mut send_control, &ClientboundControlMessage::TicketRegistered).await?;
                             },
                             ServerboundControlMessage::VoiceRegisterPlayer { uuid } => {
                                 voice.register(&uuid, &connection);
@@ -305,14 +318,10 @@ async fn try_handle_quic(
                             ServerboundControlMessage::HandingOff => {
                                 info!("{} is handing off", handle.domain());
                                 handle.detach();
-                                let response = serde_json::to_vec(&ClientboundControlMessage::HandedOff)?;
-                                send_control.write_all(&[response.len() as u8]).await?;
-                                send_control.write_all(&response).await?;
+                                write_message(&mut send_control, &ClientboundControlMessage::HandedOff).await?;
                             },
                             _ => {
-                                let response = serde_json::to_vec(&ClientboundControlMessage::UnknownMessage)?;
-                                send_control.write_all(&[response.len() as u8]).await?;
-                                send_control.write_all(&response).await?;
+                                write_message(&mut send_control, &ClientboundControlMessage::UnknownMessage).await?;
                             }
                         }
                     },
@@ -325,15 +334,8 @@ async fn try_handle_quic(
         } => r,
         r = async {
             loop {
-                let len = read_varint(&mut recv_control).await?;
-                if !(0..=8192).contains(&len) {
-                    connection.close(VarInt::from_u32(0), &[]);
-                    return Ok(());
-                }
-                let mut buf = vec![0u8; len as usize];
-                recv_control.read_exact(&mut buf).await?;
-                if let Ok(parsed) = serde_json::from_slice(&buf) {
-                    sender.send(RouterRequest::ServerboundControlMessage(parsed))?;
+                if let Some(message) = read_message(&mut recv_control).await? {
+                    sender.send(RouterRequest::ServerboundControlMessage(message))?;
                 }
             }
         } => r,
@@ -368,17 +370,22 @@ async fn listen_control(
     let app = axum::Router::new()
         .route(
             "/.well-known/dialtone_ticket/{domain}",
-            get(
-                async |Path(addr): Path<String>, RightmostXForwardedFor(ip)| {
-                    let Some(addr) = unicode_madness::validate_and_normalize_domain(&addr) else {
-                        return (StatusCode::NOT_FOUND, String::new());
-                    };
-                    match routing_table.check_ticket(&addr, ip).await {
-                        Some(ticket) => (StatusCode::OK, ticket),
-                        None => (StatusCode::NOT_FOUND, String::new()),
-                    }
-                },
-            ),
+            get(async |Path(addr): Path<String>, headers: HeaderMap| {
+                // The player's address, as Caddy (in front of this) appends it.
+                let Some(ip) = headers
+                    .get("x-forwarded-for")
+                    .and_then(|value| value.to_str().ok()?.rsplit(',').next()?.trim().parse().ok())
+                else {
+                    return (StatusCode::BAD_REQUEST, String::new());
+                };
+                let Some(addr) = netty::validate_and_normalize_domain(&addr) else {
+                    return (StatusCode::NOT_FOUND, String::new());
+                };
+                match routing_table.check_ticket(&addr, ip).await {
+                    Some(ticket) => (StatusCode::OK, ticket),
+                    None => (StatusCode::NOT_FOUND, String::new()),
+                }
+            }),
         )
         .route(
             "/metrics",

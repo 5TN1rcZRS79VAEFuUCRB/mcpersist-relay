@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "kind")]
 #[serde(rename_all = "snake_case")]
 pub enum ServerboundControlMessage {
@@ -11,16 +11,20 @@ pub enum ServerboundControlMessage {
         #[serde(default)]
         key: Option<String>,
     },
-    DialtoneRegisterTicket { ticket: String },
+    DialtoneRegisterTicket {
+        ticket: String,
+    },
     /// The host is leaving and has sent its players on to the world's next host (its
     /// background server). New players wait for that host; current ones stay connected.
     HandingOff,
     /// A player of this host's world will use Simple Voice Chat through the relay: send
     /// their voice packets here.
-    VoiceRegisterPlayer { uuid: String },
+    VoiceRegisterPlayer {
+        uuid: String,
+    },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 #[serde(tag = "kind")]
 #[serde(rename_all = "snake_case")]
 pub enum ClientboundControlMessage {
@@ -31,9 +35,15 @@ pub enum ClientboundControlMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         voice_port: Option<u16>,
     },
-    DomainAssignmentComplete { domain: String },
-    DomainAssignmentFailed { reason: String },
-    RequestMessageBroadcast { message: String },
+    DomainAssignmentComplete {
+        domain: String,
+    },
+    DomainAssignmentFailed {
+        reason: String,
+    },
+    RequestMessageBroadcast {
+        message: String,
+    },
     TicketRegistered,
     HandedOff,
 }
