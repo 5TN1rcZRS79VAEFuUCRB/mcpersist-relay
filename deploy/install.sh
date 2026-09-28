@@ -59,6 +59,8 @@ cargo install --locked iroh-relay --version "^1" --features server --root "$HOME
 # every renewal, so keep that port open.
 if [ ! -d "/etc/letsencrypt/live/$RELAY_HOST" ]; then
     if [ "$EMAIL" = none ]; then contact=--register-unsafely-without-email; else contact="-m $EMAIL --no-eff-email"; fi
+    # The caddy package starts Caddy on port 80 with its default site; it's configured below.
+    systemctl stop caddy
     certbot certonly --standalone -d "$RELAY_HOST" --non-interactive --agree-tos $contact
 fi
 cat > /etc/letsencrypt/renewal-hooks/deploy/mcpersist-relay.sh <<EOF
