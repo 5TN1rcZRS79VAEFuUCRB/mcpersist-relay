@@ -47,6 +47,12 @@ Each region is its own relay with its own base domain, e.g. `install.sh relay.eu
 eu.mcpersist.com ...`; the mod lists the regions and hosts through the nearest. List every region's iroh
 relay in `/var/www/mcpersist/relaymap.json` on the server behind the mod's relay map URL.
 
+Backups: each region's `/usr/local/bin/mcpersist-backup` (run nightly from `/etc/cron.d/mcpersist-backup`)
+sends a `sqlite3 .backup` of `names.sqlite` to the other region, which keeps 14 days in
+`/var/backups/mcpersist/`. The sending key (`/root/.ssh/mcpersist-backup`) is limited, in the receiver's
+`authorized_keys`, to a forced command that stores the upload. To restore, stop the relay and copy a
+backup over `data/names.sqlite`.
+
 ## Protocol change
 
 `{"kind": "request_domain_assignment", "key": "<16–256 chars>"}`. `key` is optional. When a key can't be
