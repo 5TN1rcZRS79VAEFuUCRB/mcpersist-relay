@@ -133,8 +133,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# The public face of the base domain: the relay list and ticket lookups only. The relay's
-# other web endpoints (/reload-certs, /stop, ...) stay on loopback.
+# The public face of the base domain: the relay list, ticket lookups and a mirror of iroh-java's
+# native libraries (put in /var/www/mcpersist/natives by hand). The relay's other web endpoints
+# (/reload-certs, /stop, ...) stay on loopback.
 if [ -n "$HOMEPAGE" ]; then fallback="redir $HOMEPAGE"; else fallback="respond 404"; fi
 mkdir -p /var/www/mcpersist
 # Every region's iroh relay goes in this list, so it's only written the first time: add the others by hand.
@@ -154,7 +155,8 @@ https://$BASE_DOMAIN {
 	handle /.well-known/dialtone_ticket/* {
 		reverse_proxy 127.0.0.1:8080
 	}
-	handle /relaymap.json {
+	@static path /relaymap.json /natives/*
+	handle @static {
 		root * /var/www/mcpersist
 		file_server
 	}
