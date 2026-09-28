@@ -43,6 +43,10 @@ It opens those ports in the server's own firewall, builds the relay, gets a Let'
 the relay host (renewals reload it live), and runs it as the `mcpersist-relay` systemd service. Re-running
 it updates to the latest `main`.
 
+Each region is its own relay with its own base domain, e.g. `install.sh relay.eu.mcpersist.com
+eu.mcpersist.com ...`; the mod lists the regions and hosts through the nearest. List every region's iroh
+relay in `/var/www/mcpersist/relaymap.json` on the server behind the mod's relay map URL.
+
 ## Protocol change
 
 `{"kind": "request_domain_assignment", "key": "<16–256 chars>"}`. `key` is optional. When a key can't be
