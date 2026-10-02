@@ -25,15 +25,15 @@ use quinn::{
     rustls::pki_types::{CertificateDer, PrivateKeyDer},
 };
 use routing::{RoutingError, RoutingTable};
-use rustls_pki_types::pem::PemObject;
+use quinn::rustls::pki_types::pem::PemObject;
 use tokio::net::TcpListener;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
 use crate::{
-    netty::{ReadExt, WriteExt, read_varint},
+    netty::{WriteExt, read_varint},
     proto::{ClientboundControlMessage, ServerboundControlMessage},
     routing::RouterRequest,
 };
@@ -293,9 +293,7 @@ async fn try_handle_quic(
                 match remote {
                     routing::RouterRequest::RouteRequest(remote) => {
                         let pair = connection.open_bi().await;
-                        if let Err(ConnectionError::ApplicationClosed(_)) = pair {
-                            break;
-                        } else if let Err(ConnectionError::ConnectionClosed(_)) = pair {
+                        if matches!(pair, Err(ConnectionError::ApplicationClosed(_) | ConnectionError::ConnectionClosed(_))) {
                             break;
                         }
                         remote.send(pair?).map_err(|e| eyre!("{:?}", e))?;
@@ -407,7 +405,7 @@ async fn listen_control(
         )
         .route(
             "/stop",
-            post(async || endpoint.close(0u32.into(), b"e4mc closing")),
+            post(async || endpoint.close(0u32.into(), b"mcpersist-relay closing")),
         );
     axum::serve(listener, app).await?;
     Err(eyre!("control endpoint closed"))
@@ -426,7 +424,7 @@ async fn try_handle_minecraft(
             .await?;
         return Ok(());
     }
-    let handshake = Handshake::new(&handshake?)?;
+    let handshake = Handshake::new(&handshake?).await?;
     let Some(address) = handshake.normalized_address() else {
         return disconnect(connection, handshake, UNKNOWN).await;
     };
@@ -466,35 +464,20 @@ async fn try_handle_minecraft(
     Ok(())
 }
 
-/// What a player is told when they can't be routed: in the server list, and on joining.
-struct Refusal {
-    status: &'static str,
-    login: &'static str,
-}
-
-const UNKNOWN: Refusal = Refusal {
-    status: include_str!("./serverlistping_response.json"),
-    login: include_str!("./disconnect_response.json"),
-};
-const RATE_LIMITED: Refusal = Refusal {
-    status: include_str!("./serverlistping_response_rate.json"),
-    login: include_str!("./disconnect_response_rate.json"),
-};
-const STARTING: Refusal = Refusal {
-    status: include_str!("./serverlistping_response_starting.json"),
-    login: include_str!("./disconnect_response_starting.json"),
-};
+// What a player is told when they can't be routed: in the server list, and on joining.
+const UNKNOWN: &str = "Unknown server. Check address and try again.";
+const RATE_LIMITED: &str = "You are trying to connect too fast. Please wait a minute before retrying.";
+const STARTING: &str = "This world is starting up. Try again in a moment.";
 
 async fn disconnect(
     mut connection: TcpStream,
     handshake: Handshake,
-    refusal: Refusal,
+    refusal: &str,
 ) -> eyre::Result<()> {
     match handshake.next_state {
         netty::HandshakeType::Status => {
             let packet = netty::read_packet(&mut connection, 1).await?;
-            let mut packet = packet.as_slice();
-            let id = packet.read_varint()?;
+            let id = read_varint(packet.as_slice()).await?;
             if id != 0 {
                 return Err(eyre!(
                     "Packet isn't a Status Request(0x00), but {:#04x}",
@@ -503,16 +486,21 @@ async fn disconnect(
             }
             let mut buf = vec![];
             buf.write_varint(0).await?;
-            buf.write_string(refusal.status).await?;
+            let status = serde_json::json!({
+                "version": {"name": "MCPersist", "protocol": -1},
+                "players": {"max": 0, "online": 0},
+                "description": {"text": refusal},
+            });
+            buf.write_string(&status.to_string()).await?;
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
             let packet = netty::read_packet(&mut connection, 9).await?;
             let mut packet = packet.as_slice();
-            let id = packet.read_varint()?;
+            let id = read_varint(&mut packet).await?;
             if id != 1 {
                 return Err(eyre!("Packet isn't a Ping Request(0x01), but {:#04x}", id));
             }
-            let payload = packet.read_long()?;
+            let payload = packet.read_u64().await?;
             let mut buf = Vec::with_capacity(1 + 8);
             buf.write_varint(1).await?;
             buf.write_u64(payload).await?;
@@ -523,7 +511,7 @@ async fn disconnect(
             let _ = netty::read_packet(&mut connection, 128).await?;
             let mut buf = vec![];
             buf.write_varint(0).await?;
-            buf.write_string(refusal.login).await?;
+            buf.write_string(&serde_json::json!({"text": refusal}).to_string()).await?;
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
         }

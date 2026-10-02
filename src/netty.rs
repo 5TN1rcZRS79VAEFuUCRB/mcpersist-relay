@@ -1,21 +1,27 @@
 #![allow(clippy::cast_sign_loss)]
 
-use std::io::Read;
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use log::error;
-use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum ReadError {
-    #[error("{0}")]
     IoError(std::io::Error),
-    #[error("Was not a netty packet, but a Legacy ServerListPing")]
     LegacyServerListPing,
-    #[error("Packet was too large")]
     PacketTooLarge,
 }
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IoError(e) => write!(f, "{e}"),
+            Self::LegacyServerListPing => f.write_str("Was not a netty packet, but a Legacy ServerListPing"),
+            Self::PacketTooLarge => f.write_str("Packet was too large"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
 
 impl From<std::io::Error> for ReadError {
     fn from(value: std::io::Error) -> Self {
@@ -26,46 +32,6 @@ impl From<std::io::Error> for ReadError {
 impl From<std::io::ErrorKind> for ReadError {
     fn from(value: std::io::ErrorKind) -> Self {
         Self::IoError(value.into())
-    }
-}
-
-pub trait ReadExt: Read {
-    fn read_u8(&mut self) -> Result<u8, ReadError> {
-        let mut buf = [0u8];
-        self.read_exact(&mut buf)?;
-        Ok(buf[0])
-    }
-
-    fn read_u16(&mut self) -> Result<u16, ReadError> {
-        let mut buf = [0u8; 2];
-        self.read_exact(&mut buf)?;
-        Ok(u16::from_be_bytes(buf))
-    }
-
-    fn read_long(&mut self) -> Result<u64, ReadError> {
-        let mut buf = [0u8; 8];
-        self.read_exact(&mut buf)?;
-        Ok(u64::from_be_bytes(buf))
-    }
-
-    fn read_string(&mut self) -> Result<String, ReadError> {
-        let len = self.read_varint()?;
-        let mut buf = vec![0u8; len as usize];
-        self.read_exact(&mut buf)?;
-        String::from_utf8(buf).map_err(|_| std::io::ErrorKind::InvalidData.into())
-    }
-
-    fn read_varint(&mut self) -> Result<i32, ReadError> {
-        let mut res = 0i32;
-        for i in 0..5 {
-            let part = self.read_u8()?;
-            res |= (i32::from(part) & 0x7F) << (7 * i);
-            if part & 0x80 == 0 {
-                return Ok(res);
-            }
-        }
-        error!("Varint is invalid");
-        Err(std::io::ErrorKind::InvalidData.into())
     }
 }
 
@@ -108,7 +74,12 @@ pub async fn read_varint(mut reader: impl AsyncReadExt + Unpin) -> Result<i32, R
     Err(std::io::ErrorKind::InvalidData.into())
 }
 
-impl<T: Read> ReadExt for T {}
+async fn read_string(mut reader: impl AsyncReadExt + Unpin) -> Result<String, ReadError> {
+    let len = read_varint(&mut reader).await?;
+    let mut buf = vec![0u8; len as usize];
+    reader.read_exact(&mut buf).await?;
+    String::from_utf8(buf).map_err(|_| std::io::ErrorKind::InvalidData.into())
+}
 
 pub trait WriteExt: AsyncWriteExt + Unpin {
     async fn write_varint(&mut self, mut val: i32) -> std::io::Result<()> {
@@ -148,27 +119,25 @@ pub enum HandshakeType {
 }
 
 impl Handshake {
-    pub fn new(mut packet: &[u8]) -> eyre::Result<Self> {
-        let packet_type = packet.read_varint()?;
-        if packet_type != 0 {
-            Err(eyre::eyre!("Not a Handshake packet"))
-        } else {
-            let protocol_version = packet.read_varint()?;
-            let server_address = packet.read_string()?;
-            let server_port = ReadExt::read_u16(&mut packet)?;
-            let next_state = match packet.read_varint()? {
-                1 => HandshakeType::Status,
-                2 => HandshakeType::Login,
-                3 => HandshakeType::Transfer,
-                _ => return Err(eyre::eyre!("Invalid next state")),
-            };
-            Ok(Self {
-                protocol_version,
-                server_address,
-                server_port,
-                next_state,
-            })
+    pub async fn new(mut packet: &[u8]) -> eyre::Result<Self> {
+        if read_varint(&mut packet).await? != 0 {
+            return Err(eyre::eyre!("Not a Handshake packet"));
         }
+        let protocol_version = read_varint(&mut packet).await?;
+        let server_address = read_string(&mut packet).await?;
+        let server_port = packet.read_u16().await?;
+        let next_state = match read_varint(&mut packet).await? {
+            1 => HandshakeType::Status,
+            2 => HandshakeType::Login,
+            3 => HandshakeType::Transfer,
+            _ => return Err(eyre::eyre!("Invalid next state")),
+        };
+        Ok(Self {
+            protocol_version,
+            server_address,
+            server_port,
+            next_state,
+        })
     }
 
     pub async fn send(
@@ -189,15 +158,10 @@ impl Handshake {
     pub fn normalized_address(&self) -> Option<String> {
         validate_and_normalize_domain(
             // yes, Forge has three different suffixes that they attach to the server address
-            if let Some(fml3_stripped) = self.server_address.strip_suffix("\0FML3\0") {
-                fml3_stripped
-            } else if let Some(fml2_stripped) = self.server_address.strip_suffix("\0FML2\0") {
-                fml2_stripped
-            } else if let Some(fml_stripped) = self.server_address.strip_suffix("\0FML\0") {
-                fml_stripped
-            } else {
-                &self.server_address
-            },
+            ["\0FML3\0", "\0FML2\0", "\0FML\0"]
+                .iter()
+                .find_map(|suffix| self.server_address.strip_suffix(suffix))
+                .unwrap_or(&self.server_address),
         )
     }
 }

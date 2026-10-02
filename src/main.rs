@@ -22,10 +22,9 @@ async fn main() -> eyre::Result<()> {
             .unwrap_or_else(|_| "0.0.0.0:24454".into())
             .parse()?,
         clock: system_clock(),
-        startup_grace: Duration::from_secs(match std::env::var("QUICLIME_STARTUP_GRACE_SECS") {
-            Ok(secs) => secs.parse()?,
-            Err(_) => 25,
-        }),
+        startup_grace: Duration::from_secs(
+            std::env::var("QUICLIME_STARTUP_GRACE_SECS").map_or(Ok(25), |secs| secs.parse())?,
+        ),
     })
     .await?;
     relay.serve().await

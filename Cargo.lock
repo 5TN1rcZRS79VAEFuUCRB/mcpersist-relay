@@ -936,7 +936,6 @@ name = "mcpersist-relay"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bytes",
  "env_logger",
  "eyre",
  "governor",
@@ -947,12 +946,10 @@ dependencies = [
  "rand",
  "rcgen",
  "rusqlite",
- "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.17",
  "tokio",
 ]
 

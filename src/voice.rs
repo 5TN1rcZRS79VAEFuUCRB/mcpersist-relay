@@ -11,7 +11,6 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
 };
 
-use bytes::Bytes;
 use log::{debug, info};
 use parking_lot::Mutex;
 use quinn::Connection;
@@ -78,7 +77,7 @@ impl VoiceRouter {
             let mut datagram = Vec::with_capacity(ADDR_LEN + len);
             datagram.extend_from_slice(&encode_addr(from));
             datagram.extend_from_slice(packet);
-            if let Err(e) = host.send_datagram(Bytes::from(datagram)) {
+            if let Err(e) = host.send_datagram(datagram.into()) {
                 debug!("Dropped voice packet for {from}: {e}");
             }
         }
