@@ -41,7 +41,9 @@ sudo bash install.sh relay.mcpersist.com mcpersist.com you@example.com
 
 It opens those ports in the server's own firewall, builds the relay, gets a Let's Encrypt certificate for
 the relay host (renewals reload it live), and runs it as the `mcpersist-relay` systemd service. Re-running
-it updates to the latest `main`.
+it updates to the latest `main`. After that it updates itself: every 15 minutes it builds a newer `main`
+whose tests passed, and restarts onto it once no world is hosted, so an update never disconnects anyone
+(`journalctl -t mcpersist-update` shows each one).
 
 Each region is its own relay with its own base domain, e.g. `install.sh relay.eu.mcpersist.com
 eu.mcpersist.com ...`; the mod lists the regions and hosts through the nearest. List every region's iroh
