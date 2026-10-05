@@ -74,4 +74,8 @@ addresses that have sent voice for that host.
 
 ## License
 
-MIT OR Apache-2.0, as upstream.
+GPL-3.0-or-later; see [LICENSE](LICENSE).
+
+Based on [e4mc-quiclime](https://github.com/vgskye/e4mc-quiclime) by Skye, which is available under
+MIT OR Apache-2.0. Its original notices are kept in [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
