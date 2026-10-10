@@ -167,7 +167,9 @@ https://$BASE_DOMAIN {
 EOF
 
 # Updates itself: every 15 minutes, a newer main whose tests passed on GitHub is built, and the
-# relay restarts onto it once no world is hosted here, so an update never disconnects anyone.
+# relay restarts onto it once no world is hosted here, so an update doesn't disconnect anyone.
+# A relay that always has a world online restarts onto it in the 4 a.m. (US Central) hour
+# instead; its worlds reconnect on their own, with the same addresses, within seconds.
 cat > /usr/local/bin/mcpersist-update <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -177,9 +179,7 @@ curl -fsS "https://api.github.com/repos/${REPO#https://github.com/}/commits/\$la
     | grep -Eq '"conclusion": ?"success"' || exit 0
 . /root/.cargo/env
 TMPDIR=/var/tmp cargo install --locked --quiet --git $REPO --rev "\$latest" --root $HOME_DIR
-# ponytail: a relay that always has a world online never restarts onto the update; add a
-# maintenance window if that happens.
-[ "\$(curl -fsS http://127.0.0.1:8080/metrics)" = "host_count 0" ] || exit 0
+[ "\$(curl -fsS http://127.0.0.1:8080/metrics)" = "host_count 0" ] || [ "\$(TZ=America/Chicago date +%H)" = 04 ] || exit 0
 systemctl restart mcpersist-relay
 echo "\$latest" > $HOME_DIR/deployed-commit
 echo "updated to \$latest"
