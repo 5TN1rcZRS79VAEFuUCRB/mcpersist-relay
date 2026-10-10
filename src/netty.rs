@@ -156,13 +156,10 @@ impl Handshake {
     }
 
     pub fn normalized_address(&self) -> Option<String> {
-        validate_and_normalize_domain(
-            // yes, Forge has three different suffixes that they attach to the server address
-            ["\0FML3\0", "\0FML2\0", "\0FML\0"]
-                .iter()
-                .find_map(|suffix| self.server_address.strip_suffix(suffix))
-                .unwrap_or(&self.server_address),
-        )
+        // Forge appends a marker after a NUL to the address it sends: \0FML\0, \0FML2\0 and \0FML3\0
+        // in older versions, \0FORGE (and more) since 1.20.2. No address contains a NUL, so
+        // everything from the first one on is dropped.
+        validate_and_normalize_domain(self.server_address.split('\0').next().unwrap_or_default())
     }
 }
 
@@ -175,4 +172,31 @@ pub(crate) fn validate_and_normalize_domain(domain: &str) -> Option<String> {
     let domain = idna::domain_to_ascii_strict(domain).ok()?;
     let (domain, err) = idna::domain_to_unicode(&domain);
     if err.is_err() { None } else { Some(domain) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forge_markers_are_dropped() {
+        for address in [
+            "world.example.com",
+            "world.example.com\0FML3\0",
+            "world.example.com\0FORGE",
+            "world.example.com\0FORGE\x001",
+        ] {
+            let handshake = Handshake {
+                protocol_version: 0,
+                server_address: address.into(),
+                server_port: 25565,
+                next_state: HandshakeType::Login,
+            };
+            assert_eq!(
+                handshake.normalized_address().as_deref(),
+                Some("world.example.com"),
+                "{address:?}"
+            );
+        }
+    }
 }
