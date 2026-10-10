@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join with MCPersist</title>
+<meta name="description" content="How to join a Minecraft server that requires the MCPersist mod, in three steps.">
+<style>
+  :root { --bg: #2b2d31; --card: #34363c; --text: #f2f3f5; --muted: #b5b8bf; --gold: #ffc83c; --link: #7ab8ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 1.8rem; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 28px; }
+  ol { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+  li { background: var(--card); border-radius: 10px; padding: 18px 20px 18px 64px; margin-bottom: 14px; position: relative; counter-increment: step; }
+  li::before { content: counter(step); position: absolute; left: 18px; top: 16px; width: 32px; height: 32px; border-radius: 50%; background: var(--gold); color: #1e1f22; font-weight: 700; display: grid; place-items: center; }
+  h2 { font-size: 1.1rem; margin: 0 0 6px; }
+  p { margin: 6px 0; }
+  a { color: var(--link); }
+  code { background: #1e1f22; padding: 2px 6px; border-radius: 4px; color: var(--gold); }
+  .note { color: var(--muted); font-size: 0.95rem; }
+  .box { border: 1px solid #4a4d55; border-radius: 10px; padding: 16px 20px; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Join with MCPersist</h1>
+  <p class="lead">The server you tried to join requires the free MCPersist mod. Setting it up takes about five minutes.</p>
+
+  <ol>
+    <li>
+      <h2>Get a modded Minecraft</h2>
+      <p>Install a launcher that handles mods for you, like the <a href="https://modrinth.com/app">Modrinth App</a>, <a href="https://prismlauncher.org">Prism Launcher</a> or the <a href="https://www.curseforge.com/download/app">CurseForge app</a>.</p>
+      <p>Create a new profile for the server's Minecraft version (for example <b>26.3</b>) with <b>Fabric</b>, <b>NeoForge</b> or <b>Forge</b>. Any of the three works.</p>
+    </li>
+    <li>
+      <h2>Add the mods</h2>
+      <p><b>MCPersist:</b> download the jar for your loader from <a href="https://github.com/5TN1rcZRS79VAEFuUCRB/MCPersist/releases/latest">the latest release</a> and add it to the profile's mods. On Fabric, also add <a href="https://modrinth.com/mod/fabric-api">Fabric API</a>.</p>
+      <p>If the server also asks for <b>Simple Voice Chat</b>, add <a href="https://modrinth.com/plugin/simple-voice-chat">Simple Voice Chat</a> for your loader too.</p>
+      <p class="note">In a launcher, "Add mods" or "Add file" puts a downloaded jar in the right place.</p>
+    </li>
+    <li>
+      <h2>Join</h2>
+      <p>Start the profile, open <b>Multiplayer</b>, click <b>Add Server</b> and enter the server's address again.</p>
+    </li>
+  </ol>
+
+  <div class="box">
+    <h2>The official server</h2>
+    <p>Address <code>official.mcpersist.com</code>: Minecraft 26.3, with MCPersist and Simple Voice Chat. Claim land with diamonds, team up, and raid rival teams in declared wars.</p>
+  </div>
+
+  <div class="box">
+    <h2>What is MCPersist?</h2>
+    <p>A mod that puts your own singleplayer world online with no port forwarding, and keeps it running after you leave. <a href="https://github.com/5TN1rcZRS79VAEFuUCRB/MCPersist">Learn more</a>.</p>
+  </div>
+</main>
+</body>
+</html>

@@ -138,6 +138,9 @@ EOF
 # (/reload-certs, /stop, ...) stay on loopback.
 if [ -n "$HOMEPAGE" ]; then fallback="redir $HOMEPAGE"; else fallback="respond 404"; fi
 mkdir -p /var/www/mcpersist
+# The how-to-join page, which servers requiring the mod send players without it to.
+mkdir -p /var/www/mcpersist/join
+cp "$(dirname "$0")/join.html" /var/www/mcpersist/join/index.html
 # Every region's iroh relay goes in this list, so it's only written the first time: add the others by hand.
 [ -f /var/www/mcpersist/relaymap.json ] || echo "[\"https://$RELAY_HOST:8443\"]" > /var/www/mcpersist/relaymap.json
 cat > /etc/caddy/Caddyfile <<EOF
@@ -155,7 +158,7 @@ https://$BASE_DOMAIN {
 	handle /.well-known/dialtone_ticket/* {
 		reverse_proxy 127.0.0.1:8080
 	}
-	@static path /relaymap.json /latest.json /natives/*
+	@static path /relaymap.json /latest.json /natives/* /join /join/*
 	handle @static {
 		root * /var/www/mcpersist
 		file_server
