@@ -176,7 +176,7 @@ set -euo pipefail
 latest=\$(git ls-remote $REPO refs/heads/main | cut -f1)
 [ "\$latest" != "\$(cat $HOME_DIR/deployed-commit 2>/dev/null)" ] || exit 0
 curl -fsS "https://api.github.com/repos/${REPO#https://github.com/}/commits/\$latest/check-runs" \\
-    | grep -Eq '"conclusion": ?"success"' || exit 0
+    | grep -E '"conclusion": ?"success"' >/dev/null || exit 0  # Not -q: quitting early fails curl, and pipefail with it.
 . /root/.cargo/env
 TMPDIR=/var/tmp cargo install --locked --quiet --git $REPO --rev "\$latest" --root $HOME_DIR
 [ "\$(curl -fsS http://127.0.0.1:8080/metrics)" = "host_count 0" ] || [ "\$(TZ=America/Chicago date +%H)" = 04 ] || exit 0
