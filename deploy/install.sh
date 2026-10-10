@@ -155,7 +155,7 @@ https://$BASE_DOMAIN {
 	handle /.well-known/dialtone_ticket/* {
 		reverse_proxy 127.0.0.1:8080
 	}
-	@static path /relaymap.json /natives/*
+	@static path /relaymap.json /latest.json /natives/*
 	handle @static {
 		root * /var/www/mcpersist
 		file_server
@@ -165,6 +165,21 @@ https://$BASE_DOMAIN {
 	}
 }
 EOF
+
+# The newest MCPersist release, for the mod to tell hosts when theirs is outdated: refreshed hourly
+# from GitHub, so a release needs nothing else.
+cat > /usr/local/bin/mcpersist-latest <<'LATEST'
+#!/usr/bin/env bash
+set -euo pipefail
+release=$(curl -fsS https://api.github.com/repos/5TN1rcZRS79VAEFuUCRB/MCPersist/releases/latest)
+version=$(sed -nE 's/^ *"tag_name": *"v?([0-9A-Za-z.+-]+)",?$/\1/p' <<<"$release" | head -1)
+[ -n "$version" ]
+printf '{"version":"%s"}\n' "$version" > /var/www/mcpersist/latest.json.tmp
+mv /var/www/mcpersist/latest.json.tmp /var/www/mcpersist/latest.json
+LATEST
+chmod +x /usr/local/bin/mcpersist-latest
+echo "7 * * * * root /usr/local/bin/mcpersist-latest 2>&1 | logger -t mcpersist-latest" > /etc/cron.d/mcpersist-latest
+/usr/local/bin/mcpersist-latest || true
 
 # Updates itself: every 15 minutes, a newer main whose tests passed on GitHub is built, and the
 # relay restarts onto it once no world is hosted here, so an update doesn't disconnect anyone.
