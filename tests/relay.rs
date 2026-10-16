@@ -101,6 +101,13 @@ async fn host_with_control(
 
 /// A host connection with its control stream open, before it asks for a domain.
 async fn connect_host(relay: &TestRelay) -> (Connection, quinn::SendStream, RecvStream) {
+    connect_host_with(relay, quinn::TransportConfig::default()).await
+}
+
+async fn connect_host_with(
+    relay: &TestRelay,
+    transport: quinn::TransportConfig,
+) -> (Connection, quinn::SendStream, RecvStream) {
     let mut roots = RootCertStore::empty();
     roots.add(relay.cert.clone()).unwrap();
     let mut tls = rustls::ClientConfig::builder()
@@ -108,9 +115,9 @@ async fn connect_host(relay: &TestRelay) -> (Connection, quinn::SendStream, Recv
         .with_no_client_auth();
     tls.alpn_protocols = vec![b"quiclime".to_vec()];
     let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls).unwrap(),
-    )));
+    let mut client = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()));
+    client.transport_config(Arc::new(transport));
+    endpoint.set_default_client_config(client);
     let conn = endpoint
         .connect(relay.quic, "localhost")
         .unwrap()
@@ -331,6 +338,34 @@ async fn a_player_leaving_resets_the_hosts_stream() {
         matches!(read, Ok(Err(_))),
         "expected the stream to be reset, got {read:?}"
     );
+}
+
+#[tokio::test]
+async fn a_host_that_stops_accepting_players_is_disconnected() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    // A host that allows one player stream at a time, like an MCPersist whose 512 all leaked.
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(1u32.into());
+    let (conn, mut send, mut recv) = connect_host_with(&relay, transport).await;
+    send_control(&mut send, json!({"kind": "request_domain_assignment", "key": KEY_A})).await;
+    let name = domain(&read_control(&mut recv).await);
+
+    let mut first = TcpStream::connect(relay.mc).await.unwrap();
+    first.write_all(&handshake(&name, 2)).await.unwrap();
+    let _held = accept(&conn).await;
+
+    // Waiting for a stream the host never frees would hold up every later player too.
+    let mut second = TcpStream::connect(relay.mc).await.unwrap();
+    second.write_all(&handshake(&name, 2)).await.unwrap();
+    second.write_all(&login_start()).await.unwrap();
+    let refusal = tokio::time::timeout(Duration::from_secs(20), read_refusal(&mut second))
+        .await
+        .expect("the second player was left waiting");
+    assert!(refusal.contains("Unknown server"), "{refusal}");
+    tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the relay kept the stuck host connected, so it never reconnects");
 }
 
 #[tokio::test]

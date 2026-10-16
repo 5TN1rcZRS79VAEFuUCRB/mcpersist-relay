@@ -292,7 +292,16 @@ async fn try_handle_quic(
             while let Some(remote) = handle.next().await {
                 match remote {
                     routing::RouterRequest::RouteRequest(remote) => {
-                        let pair = connection.open_bi().await;
+                        // open_bi waits for the host to allow another stream. A host that never
+                        // frees any (MCPersist alpha.29 and older leaked one per server-list ping)
+                        // would hold up every later player; closing makes the mod reconnect.
+                        let Ok(pair) =
+                            tokio::time::timeout(OPEN_STREAM_TIMEOUT, connection.open_bi()).await
+                        else {
+                            warn!("{} allows no more player streams; disconnecting it", handle.domain());
+                            connection.close(0u32.into(), b"no stream allowance left");
+                            break;
+                        };
                         if matches!(pair, Err(ConnectionError::ApplicationClosed(_) | ConnectionError::ConnectionClosed(_))) {
                             break;
                         }
@@ -463,6 +472,9 @@ async fn try_handle_minecraft(
     info!("Minecraft client disconnected from: {}", peer);
     Ok(())
 }
+
+/// How long a player waits for their host to allow another stream before the host is cut off.
+const OPEN_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
 // What a player is told when they can't be routed: in the server list, and on joining.
 const UNKNOWN: &str = "Unknown server. Check address and try again.";
