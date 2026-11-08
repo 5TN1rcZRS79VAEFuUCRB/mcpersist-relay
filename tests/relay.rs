@@ -348,7 +348,11 @@ async fn a_host_that_stops_accepting_players_is_disconnected() {
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_bidi_streams(1u32.into());
     let (conn, mut send, mut recv) = connect_host_with(&relay, transport).await;
-    send_control(&mut send, json!({"kind": "request_domain_assignment", "key": KEY_A})).await;
+    send_control(
+        &mut send,
+        json!({"kind": "request_domain_assignment", "key": KEY_A}),
+    )
+    .await;
     let name = domain(&read_control(&mut recv).await);
 
     let mut first = TcpStream::connect(relay.mc).await.unwrap();
@@ -525,6 +529,20 @@ async fn unknown_names_are_refused_at_once() {
     let refusal = read_refusal(&mut player).await;
     assert!(refusal.contains("Unknown server"), "{refusal}");
     assert!(started.elapsed() < GRACE);
+}
+
+#[tokio::test]
+async fn a_client_that_sends_no_handshake_is_disconnected() {
+    let dir = tempfile::tempdir().unwrap();
+    let relay = start_relay(dir.path()).await;
+    let mut silent = TcpStream::connect(relay.mc).await.unwrap();
+    // Two bytes of a handshake, then nothing, like the stalled connections seen in production.
+    silent.write_all(&[0x10, 0x00]).await.unwrap();
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(20), silent.read(&mut buf))
+        .await
+        .expect("relay kept a silent client open");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
 }
 
 #[tokio::test]

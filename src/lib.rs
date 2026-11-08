@@ -18,6 +18,7 @@ use axum::{
 use eyre::{Context, eyre};
 use log::{error, info, warn};
 use netty::{Handshake, ReadError};
+use quinn::rustls::pki_types::pem::PemObject;
 use quinn::{
     ConnectionError, Endpoint, Incoming, RecvStream, SendStream, ServerConfig, TransportConfig,
     VarInt,
@@ -25,7 +26,6 @@ use quinn::{
     rustls::pki_types::{CertificateDer, PrivateKeyDer},
 };
 use routing::{RoutingError, RoutingTable};
-use quinn::rustls::pki_types::pem::PemObject;
 use tokio::net::TcpListener;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -426,7 +426,14 @@ async fn try_handle_minecraft(
 ) -> eyre::Result<()> {
     let peer = connection.peer_addr()?;
     info!("Minecraft client connected from: {}", peer);
-    let handshake = netty::read_packet(&mut connection, 512).await;
+    // A client that connects and never finishes its handshake (scanners, or a network that
+    // silently drops the traffic) would otherwise hold the connection until the relay restarts.
+    let Ok(handshake) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, netty::read_packet(&mut connection, 512)).await
+    else {
+        info!("Minecraft client sent no handshake in time: {peer}");
+        return Ok(());
+    };
     if let Err(ReadError::LegacyServerListPing) = handshake {
         connection
             .write_all(include_bytes!("legacy_serverlistping_response.bin"))
@@ -473,12 +480,26 @@ async fn try_handle_minecraft(
     Ok(())
 }
 
+/// How long a client has to send its handshake packet after connecting.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// TCP keepalive on player connections, so one whose network vanished without a FIN or RST
+/// is closed (after about 60 s idle plus 3 unanswered probes 15 s apart) instead of kept forever.
+fn set_keepalive(connection: &TcpStream) -> std::io::Result<()> {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15))
+        .with_retries(3);
+    socket2::SockRef::from(connection).set_tcp_keepalive(&keepalive)
+}
+
 /// How long a player waits for their host to allow another stream before the host is cut off.
 const OPEN_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
 // What a player is told when they can't be routed: in the server list, and on joining.
 const UNKNOWN: &str = "Unknown server. Check address and try again.";
-const RATE_LIMITED: &str = "You are trying to connect too fast. Please wait a minute before retrying.";
+const RATE_LIMITED: &str =
+    "You are trying to connect too fast. Please wait a minute before retrying.";
 const STARTING: &str = "This world is starting up. Try again in a moment.";
 
 async fn disconnect(
@@ -523,7 +544,8 @@ async fn disconnect(
             let _ = netty::read_packet(&mut connection, 128).await?;
             let mut buf = vec![];
             buf.write_varint(0).await?;
-            buf.write_string(&serde_json::json!({"text": refusal}).to_string()).await?;
+            buf.write_string(&serde_json::json!({"text": refusal}).to_string())
+                .await?;
             connection.write_varint(buf.len() as i32).await?;
             connection.write_all(&buf).await?;
         }
@@ -544,6 +566,9 @@ async fn listen_minecraft(
     loop {
         match server.accept().await {
             Ok((connection, _)) => {
+                if let Err(e) = set_keepalive(&connection) {
+                    warn!("Couldn't enable TCP keepalive: {e:#}");
+                }
                 tokio::spawn(handle_minecraft(connection, routing_table));
             }
             Err(e) => {
